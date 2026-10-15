@@ -50,6 +50,7 @@ export const zhTWLocale: LocalePlugin = {
     "settings.themeEmber": "餘燼",
     "settings.themeContrastLight": "高對比淺色",
     "settings.themeContrastDark": "高對比深色",
+    "settings.themeZenburn": "Zenburn",
     "settings.themeSystem": "跟隨系統",
     "settings.thinkingDisplay": "思考過程顯示",
     "settings.thinkingDisplayDescription": "選擇訊息載入時模型思考區塊是否預設展開。",

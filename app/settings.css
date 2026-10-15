@@ -1603,11 +1603,11 @@
   margin: 6px 0 0;
 }
 
-/* Ten columns: System spans the first row; then five light themes,
-   five dark ones (two columns each), and the high-contrast pair (half a row each). */
+/* Fifteen columns: System spans the first row; then five light themes and five dark ones
+   (three columns each), and a row of three wide tiles (five columns each). */
 .settings-theme-options {
   display: grid;
-  grid-template-columns: repeat(10, minmax(0, 1fr));
+  grid-template-columns: repeat(15, minmax(0, 1fr));
   grid-auto-rows: 40px;
   gap: 10px;
   max-width: 428px;
@@ -1617,7 +1617,7 @@
 .settings-theme-option {
   position: relative;
   display: flex;
-  grid-column: span 2;
+  grid-column: span 3;
   min-width: 0;
   border-radius: 9px;
   cursor: pointer;
@@ -1627,7 +1627,7 @@
   grid-column: 1 / -1;
 }
 
-.settings-theme-option[data-contrast] {
+.settings-theme-option[data-wide] {
   grid-column: span 5;
 }
 
@@ -1662,6 +1662,14 @@
   font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
+}
+
+/* "High contrast light" outgrows a third of the row on a phone: let the wide names take two lines. */
+.settings-theme-option[data-wide] .settings-theme-name {
+  font-size: 11px;
+  line-height: 1.2;
+  text-align: center;
+  white-space: normal;
 }
 
 .settings-theme-system {

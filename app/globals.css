@@ -262,6 +262,27 @@ html[data-theme="contrast-dark"],
   --bg-subtle: rgba(255,255,255,0.06);
 }
 
+/* Zenburn's own colors (Jani Nurminen's low-contrast scheme); dim text lifted for WCAG AA. */
+html[data-theme="zenburn"],
+[data-theme="zenburn"] {
+  color-scheme: dark;
+  --bg: #3f3f3f;
+  --bg-panel: #383838;
+  --bg-hover: #474747;
+  --bg-selected: #4f4f4f;
+  --border: #6f6f6f;
+  --text: #dcdccc;
+  --text-muted: #cfcfbf;
+  --text-dim: #c6c6b6;
+  --accent: #f0dfaf;
+  --accent-hover: #f8eccb;
+  --accent-contrast: #3f3f3f;
+  --user-bg: #4a4a42;
+  --assistant-bg: #3f3f3f;
+  --tool-bg: #3a3a3a;
+  --bg-subtle: rgba(220,220,204,0.04);
+}
+
 /* WebKit reports dvh/innerHeight without the status-bar strip for installed
    home-screen apps even though the layout still starts at the screen's top.
    In standalone mode there is no browser toolbar to make vh unstable, and vh
