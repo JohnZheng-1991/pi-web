@@ -8,7 +8,7 @@ import { validateAgentImages } from "./image-attachments";
 import { invalidateModelsCache } from "./models-cache";
 import { invalidateModelRuntimeWithExtensions } from "./model-runtime";
 import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
-import { findDeferredModel, rememberProviderModels } from "./deferred-provider-models";
+import { findDeferredModel, findDeferredStartupModel, rememberProviderModels } from "./deferred-provider-models";
 import { isBlockingExtensionUiRequest } from "./extension-ui-queue";
 import {
   createProjectCommandBashExtension,
@@ -2577,10 +2577,8 @@ export async function startRpcSession(
       && !services.resourceLoader.getExtensions().extensions.some((extension) => extension.tools.has("codemode"))) {
       throw new Error("Code mode is unavailable: builtin:codemode was not registered");
     }
-    const scope = await resolveVisibleModels(
-      services.modelRuntime,
-      services.settingsManager.getEnabledModels(),
-    );
+    const enabledModels = services.settingsManager.getEnabledModels();
+    const scope = await resolveVisibleModels(services.modelRuntime, enabledModels);
     // A provider an extension registers only at session_start (lib/deferred-provider-models.ts)
     // has no model in this runtime yet: build on the default, switch once extensions are bound.
     const deferredInitialModel = initialModel && !services.modelRuntime.getModel(initialModel.provider, initialModel.modelId)
@@ -2598,6 +2596,9 @@ export async function startRpcSession(
       : undefined;
     const defaultProvider = services.settingsManager.getDefaultProvider();
     const defaultModelId = services.settingsManager.getDefaultModel();
+    const defaultModel = defaultProvider && defaultModelId
+      ? { provider: defaultProvider, modelId: defaultModelId }
+      : undefined;
     const branch = sessionManager.getBranch();
     // System messages carry the prompt and tool loadout, not a conversation.
     const hasExistingMessages = branch.some((entry) => entry.type === "message" && entry.message.role !== "system");
@@ -2609,19 +2610,29 @@ export async function startRpcSession(
       : undefined;
     const initial = hasExistingMessages ? null : selectInitialModelScope(scope, {
         ...(effectiveInitialModel ? { requestedModel: effectiveInitialModel } : {}),
-        ...(defaultProvider && defaultModelId
-          ? { defaultModel: { provider: defaultProvider, modelId: defaultModelId } }
-          : {}),
+        ...(defaultModel ? { defaultModel } : {}),
         ...(thinkingLevel ? { thinkingLevel } : {}),
       });
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
       : initial?.model;
+    // With no usable model asked for, the browser shows what /api/models pre-selects, deferred
+    // providers counted in, and sends none (#1240): when that is a deferred model, switch to it too.
+    const deferredStartup = !hasExistingMessages && !chatOnly && !deferredInitialModel && !effectiveInitialModel
+      ? await findDeferredStartupModel(services.modelRuntime, enabledModels, {
+          ...(defaultModel ? { defaultModel } : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
+        })
+      : undefined;
     const deferredModel = hasExistingMessages
       ? savedModel && !restoredModel
         ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
         : undefined
-      : deferredInitialModel;
+      : deferredInitialModel ?? deferredStartup?.model;
+    // set_model applies the model's saved level, else settings' default: keep one asked for or pinned.
+    const deferredThinkingLevel = hasExistingMessages
+      ? undefined
+      : deferredInitialModel ? thinkingLevel : deferredStartup?.thinkingLevel;
     // The extension's model a Chat-only session wanted (saved, chosen or default); a prompt names
     // it when the session ended up with no model at all.
     const chatOnlyExtensionModel = chatOnly
@@ -2679,6 +2690,7 @@ export async function startRpcSession(
         try {
           await wrapper.waitUntilReady();
           await wrapper.send({ type: "set_model", provider: deferredModel.provider, modelId: deferredModel.id });
+          if (deferredThinkingLevel) await wrapper.send({ type: "set_thinking_level", level: deferredThinkingLevel });
         } catch (error) {
           console.error(`[pi-web] could not switch to ${deferredModel.provider}/${deferredModel.id}:`, error instanceof Error ? error.message : error);
         }

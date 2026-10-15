@@ -1,5 +1,7 @@
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { invalidateModelsCache } from "./models-cache";
+import { resolveVisibleModels, selectInitialModelScope, type InitialModelScopeOptions } from "./model-scope";
 
 type RuntimeModel = Awaited<ReturnType<ModelRuntime["getAvailable"]>>[number];
 
@@ -65,4 +67,28 @@ export function withDeferredProviderModels(runtime: ModelRuntime): ModelRuntime 
 /** A remembered model whose provider this runtime has not registered yet. */
 export function findDeferredModel(runtime: ModelRuntime, provider: string, modelId: string): RuntimeModel | undefined {
   return deferredProviderModels(runtime).find((model) => model.provider === provider && model.id === modelId);
+}
+
+/**
+ * The deferred model a new session that asked for no usable model should start on: pi's startup
+ * pick with deferred providers counted in, as `/api/models` pre-selects it for a browser that
+ * then sends no model (#1240). The `enabledModels` patterns see the deferred models, so a default
+ * they leave out is passed over as for a registered one. Undefined when the pick is a model this
+ * runtime has, which the session already starts on.
+ */
+export async function findDeferredStartupModel(
+  runtime: ModelRuntime,
+  enabledModels: string[] | undefined,
+  options: Omit<InitialModelScopeOptions, "requestedModel">,
+): Promise<{ model: RuntimeModel; thinkingLevel?: ThinkingLevel } | undefined> {
+  if (deferredProviderModels(runtime).length === 0) return undefined;
+  let selected: ReturnType<typeof selectInitialModelScope>;
+  try {
+    selected = selectInitialModelScope(await resolveVisibleModels(withDeferredProviderModels(runtime), enabledModels), options);
+  } catch {
+    // An entry ambiguous only once deferred models count (a bare id two providers share).
+    return undefined;
+  }
+  const model = selected.model && findDeferredModel(runtime, selected.model.provider, selected.model.id);
+  return model ? { model, ...(selected.thinkingLevel ? { thinkingLevel: selected.thinkingLevel } : {}) } : undefined;
 }
