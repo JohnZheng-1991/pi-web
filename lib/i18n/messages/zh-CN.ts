@@ -46,6 +46,8 @@ export const zhCNLocale: LocalePlugin = {
     "settings.themeSand": "暖沙",
     "settings.themeSlate": "岩蓝",
     "settings.themeDusk": "暮紫",
+    "settings.themeContrastLight": "高对比浅色",
+    "settings.themeContrastDark": "高对比深色",
     "settings.themeSystem": "跟随系统",
     "settings.thinkingDisplay": "思考过程显示",
     "settings.thinkingDisplayDescription": "选择消息加载时模型思考块是否默认展开。",

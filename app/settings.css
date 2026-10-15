@@ -1603,7 +1603,7 @@
   margin: 6px 0 0;
 }
 
-/* System spans the first row, split light | dark; light themes below, dark under them. */
+/* System spans the first row, split light | dark; then the light row, the dark row, and the high-contrast pair. */
 .settings-theme-options {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 76px));
@@ -1622,6 +1622,10 @@
 
 .settings-theme-option[data-system] {
   grid-column: 1 / -1;
+}
+
+.settings-theme-option[data-contrast] {
+  grid-column: span 2;
 }
 
 .settings-theme-swatch {

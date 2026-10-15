@@ -183,6 +183,46 @@ html[data-theme="dusk"],
   --bg-subtle: rgba(225,210,245,0.04);
 }
 
+/* High contrast: every text token reaches WCAG AAA (7:1) on every surface. */
+[data-theme="contrast-light"] {
+  color-scheme: light;
+  --bg: #ffffff;
+  --bg-panel: #f3f3f3;
+  --bg-hover: #e6e6e6;
+  --bg-selected: #d9d9d9;
+  --border: #5c5c5c;
+  --text: #000000;
+  --text-muted: #1f1f1f;
+  --text-dim: #2e2e2e;
+  --accent: #0034a0;
+  --accent-hover: #002678;
+  --accent-contrast: #ffffff;
+  --user-bg: #eaf0ff;
+  --assistant-bg: #ffffff;
+  --tool-bg: #f7f7f7;
+  --bg-subtle: rgba(0,0,0,0.05);
+}
+
+html[data-theme="contrast-dark"],
+[data-theme="contrast-dark"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --bg-panel: #0f0f0f;
+  --bg-hover: #1f1f1f;
+  --bg-selected: #2e2e2e;
+  --border: #a3a3a3;
+  --text: #ffffff;
+  --text-muted: #ebebeb;
+  --text-dim: #d6d6d6;
+  --accent: #ffd60a;
+  --accent-hover: #ffe566;
+  --accent-contrast: #000000;
+  --user-bg: #1a1a1a;
+  --assistant-bg: #000000;
+  --tool-bg: #0d0d0d;
+  --bg-subtle: rgba(255,255,255,0.06);
+}
+
 /* WebKit reports dvh/innerHeight without the status-bar strip for installed
    home-screen apps even though the layout still starts at the screen's top.
    In standalone mode there is no browser toolbar to make vh unstable, and vh
