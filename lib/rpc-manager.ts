@@ -225,6 +225,8 @@ export interface RpcSessionStartOptions {
 
 const CODING_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
 const THINKING_LEVEL_NAMES = new Set<ThinkingLevel>(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+// The SDK's DEFAULT_THINKING_LEVEL (dist/core/defaults.js), which it does not export.
+const SDK_DEFAULT_THINKING_LEVEL: ThinkingLevel = "medium";
 
 // Extensions require a complete Theme, while the web UI applies its own styling.
 class PlainTextTheme extends Theme {
@@ -2616,23 +2618,40 @@ export async function startRpcSession(
     const startupModel = restoredModel && services.modelRuntime.hasConfiguredAuth(restoredModel.provider)
       ? restoredModel
       : initial?.model;
-    // With no usable model asked for, the browser shows what /api/models pre-selects, deferred
-    // providers counted in, and sends none (#1240): when that is a deferred model, switch to it too.
-    const deferredStartup = !hasExistingMessages && !chatOnly && !deferredInitialModel && !effectiveInitialModel
-      ? await findDeferredStartupModel(services.modelRuntime, enabledModels, {
-          ...(defaultModel ? { defaultModel } : {}),
-          ...(thinkingLevel ? { thinkingLevel } : {}),
-        })
+    // A registered default the session starts on is in scope with deferred models counted too
+    // (globs and exact entries only gain matches), unless the scope fell back to every model.
+    const startsOnDefault = Boolean(initial?.model && defaultModel
+      && initial.model.provider === defaultModel.provider && initial.model.id === defaultModel.modelId
+      && (scope.scopedModels.length > 0 || !enabledModels?.some((pattern) => pattern.trim())));
+    // pi's pick with deferred providers counted in, as /api/models shows it (#1240): a deferred
+    // model asked for gets its enabledModels pin; with no usable model asked for, the browser shows
+    // that pick and sends none, so a deferred pick is switched to as well.
+    const deferredStartup = !hasExistingMessages && !chatOnly && (deferredInitialModel || (!effectiveInitialModel && !startsOnDefault))
+      ? await findDeferredStartupModel(services.modelRuntime, enabledModels, deferredInitialModel
+        ? { requestedModel: { provider: deferredInitialModel.provider, modelId: deferredInitialModel.id } }
+        : defaultModel ? { defaultModel } : {})
       : undefined;
     const deferredModel = hasExistingMessages
       ? savedModel && !restoredModel
         ? findDeferredModel(services.modelRuntime, savedModel.provider, savedModel.modelId)
         : undefined
       : deferredInitialModel ?? deferredStartup?.model;
-    // set_model applies the model's saved level, else settings' default: keep one asked for or pinned.
-    const deferredThinkingLevel = hasExistingMessages
+    // set_model applies the model's modelThinkingLevels entry, else defaultThinkingLevel, else keeps
+    // the current level: the stand-in model's (clamped, or its own pin). Apply what pi's
+    // createAgentSession gives this model at startup instead: a resumed session's last saved level,
+    // else the default; a new one's requested level, else the model's enabledModels pin, its
+    // modelThinkingLevels entry, else the default.
+    const deferredThinkingLevel = !deferredModel
       ? undefined
-      : deferredInitialModel ? thinkingLevel : deferredStartup?.thinkingLevel;
+      : hasExistingMessages
+        ? (branch.findLast((entry) => entry.type === "thinking_level_change")?.thinkingLevel as ThinkingLevel | undefined)
+          ?? services.settingsManager.getDefaultThinkingLevel()
+          ?? SDK_DEFAULT_THINKING_LEVEL
+        : thinkingLevel
+          ?? deferredStartup?.thinkingLevelPin
+          ?? services.settingsManager.getModelThinkingLevel(deferredModel.provider, deferredModel.id)
+          ?? services.settingsManager.getDefaultThinkingLevel()
+          ?? SDK_DEFAULT_THINKING_LEVEL;
     // The extension's model a Chat-only session wanted (saved, chosen or default); a prompt names
     // it when the session ended up with no model at all.
     const chatOnlyExtensionModel = chatOnly

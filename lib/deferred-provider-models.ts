@@ -70,25 +70,27 @@ export function findDeferredModel(runtime: ModelRuntime, provider: string, model
 }
 
 /**
- * The deferred model a new session that asked for no usable model should start on: pi's startup
- * pick with deferred providers counted in, as `/api/models` pre-selects it for a browser that
- * then sends no model (#1240). The `enabledModels` patterns see the deferred models, so a default
- * they leave out is passed over as for a registered one. Undefined when the pick is a model this
- * runtime has, which the session already starts on.
+ * pi's startup pick for a new session with deferred providers counted in, as `/api/models` makes
+ * it for the model picker (#1240): the requested model, else the default when in scope, else the
+ * scope's first model. The `enabledModels` patterns see the deferred models, so a default they
+ * leave out is passed over as for a registered one. Returns the pick with its `enabledModels`
+ * thinking pin when it is a deferred model; undefined when it is one this runtime has (the
+ * session already starts on it) or the requested model is out of scope.
  */
 export async function findDeferredStartupModel(
   runtime: ModelRuntime,
   enabledModels: string[] | undefined,
-  options: Omit<InitialModelScopeOptions, "requestedModel">,
-): Promise<{ model: RuntimeModel; thinkingLevel?: ThinkingLevel } | undefined> {
+  options: Omit<InitialModelScopeOptions, "thinkingLevel">,
+): Promise<{ model: RuntimeModel; thinkingLevelPin?: ThinkingLevel } | undefined> {
   if (deferredProviderModels(runtime).length === 0) return undefined;
   let selected: ReturnType<typeof selectInitialModelScope>;
   try {
     selected = selectInitialModelScope(await resolveVisibleModels(withDeferredProviderModels(runtime), enabledModels), options);
   } catch {
-    // An entry ambiguous only once deferred models count (a bare id two providers share).
+    // A requested model out of scope, or an entry ambiguous only once deferred models count
+    // (a bare id two providers share).
     return undefined;
   }
   const model = selected.model && findDeferredModel(runtime, selected.model.provider, selected.model.id);
-  return model ? { model, ...(selected.thinkingLevel ? { thinkingLevel: selected.thinkingLevel } : {}) } : undefined;
+  return model ? { model, ...(selected.thinkingLevel ? { thinkingLevelPin: selected.thinkingLevel } : {}) } : undefined;
 }
