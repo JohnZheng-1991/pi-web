@@ -1603,7 +1603,7 @@
   margin: 6px 0 0;
 }
 
-/* Ten columns: System spans the first row, split light | dark; then five light themes,
+/* Ten columns: System spans the first row; then five light themes,
    five dark ones (two columns each), and the high-contrast pair (half a row each). */
 .settings-theme-options {
   display: grid;
@@ -1664,12 +1664,27 @@
   white-space: nowrap;
 }
 
-.settings-theme-option[data-system] .settings-theme-name {
-  width: 200%;
+.settings-theme-system {
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  background: var(--bg-panel);
 }
 
-.settings-theme-option[data-system] .settings-theme-fill + .settings-theme-fill .settings-theme-name {
-  left: -100%;
+.settings-theme-chip {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg);
+}
+
+.settings-theme-system-name {
+  margin-left: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .settings-theme-option:not(:has(input:checked)):hover {

@@ -178,9 +178,6 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         <div role="radiogroup" aria-label={t("settings.appearance")} className="settings-theme-options">
           {THEME_OPTIONS.map((option) => {
             const selected = preference === option.id;
-            // Each fill carries its palette's data-theme, so it paints with that theme's own variables.
-            // System's two halves each hold the whole name, clipped at the seam.
-            const fills = option.id === "auto" ? (["light", "dark"] as const) : [option.id];
             return (
               <label
                 key={option.id}
@@ -196,13 +193,21 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
                   onChange={() => setThemePreference(option.id)}
                   className="sr-only"
                 />
-                <span className="settings-theme-swatch" aria-hidden="true">
-                  {fills.map((fill) => (
-                    <span key={fill} data-theme={fill} className="settings-theme-fill">
+                {/* A data-theme span paints with that theme's own variables. System is a switch, not a
+                    palette: a neutral tile with a light and a dark chip beside its name. */}
+                {option.id === "auto" ? (
+                  <span className="settings-theme-swatch settings-theme-system" aria-hidden="true">
+                    <span data-theme="light" className="settings-theme-chip" />
+                    <span data-theme="dark" className="settings-theme-chip" />
+                    <span className="settings-theme-system-name">{t(option.label)}</span>
+                  </span>
+                ) : (
+                  <span className="settings-theme-swatch" aria-hidden="true">
+                    <span data-theme={option.id} className="settings-theme-fill">
                       <span className="settings-theme-name">{t(option.label)}</span>
                     </span>
-                  ))}
-                </span>
+                  </span>
+                )}
                 <span className="sr-only">{t(option.label)}</span>
               </label>
             );
