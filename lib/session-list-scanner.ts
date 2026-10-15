@@ -4,9 +4,12 @@
 // that changed, which a later normal listing hydrates. A file that only grew
 // since its last scan is parsed from where that scan stopped (#1259).
 // ponytail: size/mtime fingerprints miss same-size edits with restored mtime,
-// and the resume check samples only the header line and the bytes before the
-// resume offset, so a longer rewrite that keeps both reads as an append; use
-// content hashes if detecting those edits becomes necessary.
+// and the resume check compares only the inode, the header line and the bytes
+// before the resume offset: an in-place edit that keeps all three (same-length,
+// same inode), then an append, reads as an append, and the stale row persists
+// across later appends until a change that does not grow the file, or replaces
+// it, forces a full read. Use content hashes if detecting those edits becomes
+// necessary.
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { open, readdir, stat } from "node:fs/promises";
@@ -42,9 +45,12 @@ const SUMMARY_HEADER_MAX_BYTES = 64 * 1024;
  * the last newline-terminated line parsed; the row's own name, count and first
  * message are the running totals (a scan that counted an unterminated last line
  * keeps no resume point). `check` hashes the header line, [0, headerEnd), with
- * the RESUME_SAMPLE_BYTES before `offset`: a rewrite in place fails it.
+ * the RESUME_SAMPLE_BYTES before `offset`: a rewrite in place fails it. `ino`
+ * catches a file replaced by a rename (sed -i, editors, git checkout, a backup
+ * restored), whatever its bytes.
  */
 interface ResumePoint {
+	ino: number;
 	offset: number;
 	headerEnd: number;
 	check: string;
@@ -65,6 +71,8 @@ function isRecord(value: unknown): value is RawEntry {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+// Bump on any change to what foldEntry() counts: a resumed scan adds to totals
+// counted under the rules its prefix was scanned with.
 const INDEX_FORMAT_VERSION = 1;
 /** A trailing throttle: a run's rescans rewrite the index once per window. */
 const INDEX_PERSIST_DELAY_MS = 5_000;
@@ -74,7 +82,14 @@ const NEWLINE = Buffer.from("\n");
 declare global {
 	var __piWebScanIndex: Map<string, IndexEntry> | undefined;
 	var __piWebScanIndexLoaded: boolean | undefined;
-	var __piWebScanIndexSaveTimer: NodeJS.Timeout | undefined;
+	var __piWebScanIndexSave: PendingIndexSave | undefined;
+}
+
+/** A queued index write: where it goes and what, both fixed by the last scan that changed it. */
+interface PendingIndexSave {
+	path: string;
+	entries: Array<[string, IndexEntry]>;
+	timer: NodeJS.Timeout;
 }
 
 function parseLine(line: string): RawEntry | null {
@@ -220,7 +235,8 @@ function readHeader(entry: RawEntry, head: Buffer | undefined): SessionHeader {
 	};
 }
 
-// Uses the SDK's buildSessionInfo() semantics for displayed metadata.
+// Uses the SDK's buildSessionInfo() semantics for displayed metadata. A change
+// to these rules must bump INDEX_FORMAT_VERSION (resumed totals keep the old ones).
 function foldEntry(totals: ScanTotals, entry: RawEntry): void {
 	if (entry.type === "session_info") {
 		totals.name =
@@ -252,20 +268,24 @@ function sampleCheck(head: Buffer, tail: Buffer): string {
 	return createHash("sha1").update(head).update(tail).digest("base64");
 }
 
-/** The last RESUME_SAMPLE_BYTES of `previous`, then `line` and its newline. */
-function sampleAfter(previous: Buffer, line: Buffer): Buffer {
-	const size = RESUME_SAMPLE_BYTES;
-	if (line.length + 1 >= size) {
-		const sample = Buffer.allocUnsafe(size);
-		line.copy(sample, 0, line.length + 1 - size);
-		sample[size - 1] = 0x0a;
-		return sample;
+/** Drop leading parts not needed for the last RESUME_SAMPLE_BYTES of `parts`. */
+function keepLastBytes(parts: Buffer[]): Buffer[] {
+	let total = 0;
+	for (const part of parts) total += part.length;
+	let first = 0;
+	while (first < parts.length - 1 && total - parts[first].length >= RESUME_SAMPLE_BYTES) {
+		total -= parts[first].length;
+		first++;
 	}
-	const keep = Math.min(previous.length, size - line.length - 1);
-	return Buffer.concat([previous.subarray(previous.length - keep), line, NEWLINE]);
+	return first > 0 ? parts.slice(first) : parts;
 }
 
-/** One newline-free run of bytes as readline yields it: a lone \r ends a line too. */
+/**
+ * One newline-free run of bytes split into lines as the scan's readline read
+ * did on Node 22: \r\n and a lone \r end a line. U+2028 and U+2029, which
+ * JSON.stringify leaves raw and Node 24's readline splits on, stay inside the
+ * line, as pi's own loader keeps them.
+ */
 function linesOf(bytes: Buffer): string[] {
 	const text = bytes.toString("utf8");
 	return text.includes("\r") ? text.split("\r") : [text];
@@ -292,22 +312,35 @@ async function readLines(
 ): Promise<LineScan | null> {
 	let offset = start;
 	let pending: Buffer[] = [];
+	// The bytes read up to `offset`, as views, trimmed to what the sample needs
+	// once per chunk (not per line: a full scan of short lines stays as fast).
+	let read = [sample];
 	for await (const chunk of createReadStream(filePath, { start }) as AsyncIterable<Buffer>) {
-		let lineStart = 0;
 		let newline = chunk.indexOf(0x0a);
+		if (newline === -1) {
+			pending.push(chunk);
+			continue;
+		}
+		const carried = pending;
+		let lineStart = 0;
 		while (newline !== -1) {
 			const piece = chunk.subarray(lineStart, newline);
 			const bytes = pending.length > 0 ? Buffer.concat([...pending, piece]) : piece;
 			pending = [];
 			offset += bytes.length + 1;
 			if (!onLine(bytes, offset)) return null;
-			sample = sampleAfter(sample, bytes);
 			lineStart = newline + 1;
 			newline = chunk.indexOf(0x0a, lineStart);
 		}
+		read = keepLastBytes([...read, ...carried, chunk.subarray(0, lineStart)]);
 		if (lineStart < chunk.length) pending.push(chunk.subarray(lineStart));
 	}
-	return { offset, sample, rest: Buffer.concat(pending) };
+	const joined = Buffer.concat(read);
+	return {
+		offset,
+		sample: joined.subarray(Math.max(0, joined.length - RESUME_SAMPLE_BYTES)),
+		rest: Buffer.concat(pending),
+	};
 }
 
 /**
@@ -343,7 +376,9 @@ async function scanSessionFile(
 ): Promise<Omit<IndexEntry, "fp"> | null> {
 	try {
 		const stats = await stat(filePath);
-		const resumed = previous?.resume ? await readResumeSample(filePath, previous.resume) : null;
+		const resumed = previous?.resume && previous.resume.ino === stats.ino
+			? await readResumeSample(filePath, previous.resume)
+			: null;
 		let header: SessionHeader | null = null;
 		let headerEnd = 0;
 		let start = 0;
@@ -388,8 +423,8 @@ async function scanSessionFile(
 		};
 
 		const scan = await readLines(filePath, start, sample, parseLines);
-		// The unterminated rest counts for this listing as readline would count
-		// it; a resume point is kept only when it changed nothing.
+		// The unterminated rest counts for this listing, as it did when the scan
+		// read lines with readline; a resume point is kept only when it changed nothing.
 		if (!scan || (scan.rest.length > 0 && !parseLines(scan.rest, null))) return null;
 		if (!header) return null;
 		const { id, cwd, created, parentSessionPath, time, head } = header;
@@ -413,8 +448,10 @@ async function scanSessionFile(
 				messageCount: totals.messageCount,
 				firstMessage: totals.firstMessage || "(no messages)",
 			},
-			resume: head && headerEnd > 0 && !restCounted
+			// An inode of 0 (no stable one on this filesystem) never resumes.
+			resume: head && headerEnd > 0 && !restCounted && stats.ino > 0
 				? {
+					ino: stats.ino,
 					offset: scan.offset,
 					headerEnd,
 					check: sampleCheck(head, scan.sample),
@@ -479,15 +516,16 @@ function getIndex(): Map<string, IndexEntry> {
 	return globalThis.__piWebScanIndex;
 }
 
-function indexFilePath(): string {
-	return join(getAgentDir(), "pi-web-session-index.json");
+function indexFilePath(agentDir = getAgentDir()): string {
+	return join(agentDir, "pi-web-session-index.json");
 }
 
 /** A persisted resume point, or undefined when it is missing or malformed (the entry stays). */
 function readResumePoint(value: unknown): ResumePoint | undefined {
 	if (!isRecord(value)) return undefined;
-	const { offset, headerEnd, check, hasFirstMessage, lastActivityTime } = value;
+	const { ino, offset, headerEnd, check, hasFirstMessage, lastActivityTime } = value;
 	if (
+		typeof ino !== "number" || !Number.isFinite(ino) || ino <= 0 ||
 		typeof headerEnd !== "number" || !Number.isSafeInteger(headerEnd) || headerEnd <= 0 ||
 		typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < headerEnd ||
 		typeof check !== "string" ||
@@ -495,6 +533,7 @@ function readResumePoint(value: unknown): ResumePoint | undefined {
 		(lastActivityTime !== undefined && (typeof lastActivityTime !== "number" || !Number.isFinite(lastActivityTime)))
 	) return undefined;
 	return {
+		ino,
 		offset,
 		headerEnd,
 		check,
@@ -553,25 +592,37 @@ function loadPersistedIndex(): void {
 }
 
 function persistIndex(): void {
-	clearTimeout(globalThis.__piWebScanIndexSaveTimer);
-	globalThis.__piWebScanIndexSaveTimer = undefined;
+	const pending = globalThis.__piWebScanIndexSave;
+	if (!pending) return;
+	clearTimeout(pending.timer);
+	globalThis.__piWebScanIndexSave = undefined;
 	try {
-		const entries: Record<string, IndexEntry> = {};
-		for (const [pathKey, entry] of getIndex()) entries[pathKey] = entry;
 		writePrivateFileAtomicSync(
-			indexFilePath(),
-			JSON.stringify({ version: INDEX_FORMAT_VERSION, entries }),
+			pending.path,
+			JSON.stringify({ version: INDEX_FORMAT_VERSION, entries: Object.fromEntries(pending.entries) }),
 		);
 	} catch {
 		// persistence is best-effort; the in-memory index remains authoritative
 	}
 }
 
-function queueIndexPersist(): void {
-	if (globalThis.__piWebScanIndexSaveTimer) return;
-	globalThis.__piWebScanIndexSaveTimer = setTimeout(persistIndex, INDEX_PERSIST_DELAY_MS);
+/**
+ * Write the index to `path` once INDEX_PERSIST_DELAY_MS has passed, with what
+ * it holds now. Later scans of the same agent dir only replace what is written;
+ * a scan of another one sends the pending write to its own dir first.
+ */
+function queueIndexPersist(path: string): void {
+	const entries = [...getIndex()];
+	const pending = globalThis.__piWebScanIndexSave;
+	if (pending?.path === path) {
+		pending.entries = entries;
+		return;
+	}
+	persistIndex();
+	const timer = setTimeout(persistIndex, INDEX_PERSIST_DELAY_MS);
 	// A pending write never holds a process open: a lost one means a rescan.
-	globalThis.__piWebScanIndexSaveTimer.unref?.();
+	timer.unref?.();
+	globalThis.__piWebScanIndexSave = { path, entries, timer };
 }
 
 /**
@@ -585,7 +636,8 @@ export async function listSessionsIncremental(
 	loadPersistedIndex();
 	const deferDetails = options.deferDetails ?? false;
 
-	const sessionsDir = join(getAgentDir(), "sessions");
+	const agentDir = getAgentDir();
+	const sessionsDir = join(agentDir, "sessions");
 	const files = await enumerateSessionFiles(sessionsDir);
 	globalThis.__piSessionMembership = { files: new Set(files) };
 
@@ -656,7 +708,7 @@ export async function listSessionsIncremental(
 		}
 	});
 
-	if (changed.length > 0 || stale.length > 0) queueIndexPersist();
+	if (changed.length > 0 || stale.length > 0) queueIndexPersist(indexFilePath(agentDir));
 
 	// Preserve catalogue order for timestamp ties, independently of cache hits
 	// and the order in which concurrent file reads complete. Since pi 0.86 the
@@ -675,15 +727,15 @@ export async function listSessionsIncremental(
 
 /** Test seam: write a pending index save now instead of after its delay. */
 export function flushSessionScanIndexForTests(): void {
-	if (globalThis.__piWebScanIndexSaveTimer) persistIndex();
+	persistIndex();
 }
 
 /** Test seam: drop all in-memory index state and any pending index save. */
 export function resetSessionScanIndexForTests(): void {
-	clearTimeout(globalThis.__piWebScanIndexSaveTimer);
+	clearTimeout(globalThis.__piWebScanIndexSave?.timer);
 	globalThis.__piWebScanIndex = undefined;
 	globalThis.__piWebScanIndexLoaded = undefined;
-	globalThis.__piWebScanIndexSaveTimer = undefined;
+	globalThis.__piWebScanIndexSave = undefined;
 	globalThis.__piSessionMembership = undefined;
 	globalThis.__piSessionMembershipCheck = undefined;
 }
