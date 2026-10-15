@@ -8,7 +8,7 @@ import { DARK_THEMES, THEME_OPTIONS } from "../lib/theme.ts";
 const base = process.env.E2E_BASE_URL || "http://127.0.0.1:30141";
 const artifacts = fileURLToPath(new URL("../test-results/themes/", import.meta.url));
 const themes = THEME_OPTIONS.map(({ id }) => id);
-const labels = ["System", "Light", "Mist", "Rose", "Sand", "Dark", "Pine", "Slate", "Dusk", "High contrast light", "High contrast dark"];
+const labels = ["System", "Light", "Mist", "Lilac", "Sand", "Rose", "Dark", "Pine", "Dusk", "Ember", "Slate", "High contrast light", "High contrast dark"];
 await mkdir(artifacts, { recursive: true });
 const browser = await chromium.launch();
 
@@ -84,9 +84,9 @@ try {
     await page.getByRole("radio", { name: "Pine", exact: true }).locator("..").click();
     await page.emulateMedia({ colorScheme: "light" });
     await expectTheme("pine");
-    const sand = page.getByRole("radio", { name: "Sand", exact: true });
-    await sand.focus();
-    await sand.press("ArrowRight");
+    const rose = page.getByRole("radio", { name: "Rose", exact: true });
+    await rose.focus();
+    await rose.press("ArrowRight");
     await expectTheme("dark");
     assert.equal(await page.getByRole("radio", { name: "Dark", exact: true }).isChecked(), true);
     await page.keyboard.press("Escape");

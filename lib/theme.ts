@@ -1,14 +1,17 @@
 // Settings shows these as swatches: System, the light row, the dark row, then the high-contrast pair.
+// The rows line up by hue: each light theme sits above its dark counterpart; Rose and Slate have none.
 export const THEME_OPTIONS = [
   { id: "auto", label: "settings.themeSystem", scheme: null },
   { id: "light", label: "settings.themeLight", scheme: "light" },
   { id: "mist", label: "settings.themeMist", scheme: "light" },
-  { id: "rose", label: "settings.themeRose", scheme: "light" },
+  { id: "lilac", label: "settings.themeLilac", scheme: "light" },
   { id: "sand", label: "settings.themeSand", scheme: "light" },
+  { id: "rose", label: "settings.themeRose", scheme: "light" },
   { id: "dark", label: "settings.themeDark", scheme: "dark" },
   { id: "pine", label: "settings.themePine", scheme: "dark" },
-  { id: "slate", label: "settings.themeSlate", scheme: "dark" },
   { id: "dusk", label: "settings.themeDusk", scheme: "dark" },
+  { id: "ember", label: "settings.themeEmber", scheme: "dark" },
+  { id: "slate", label: "settings.themeSlate", scheme: "dark" },
   { id: "contrast-light", label: "settings.themeContrastLight", scheme: "light" },
   { id: "contrast-dark", label: "settings.themeContrastDark", scheme: "dark" },
 ] as const;

@@ -183,6 +183,45 @@ html[data-theme="dusk"],
   --bg-subtle: rgba(225,210,245,0.04);
 }
 
+[data-theme="lilac"] {
+  color-scheme: light;
+  --bg: #f8f6fc;
+  --bg-panel: #efebf6;
+  --bg-hover: #e8e2f2;
+  --bg-selected: #e0d8ed;
+  --border: #c4b8d8;
+  --text: #2b2635;
+  --text-muted: #574d68;
+  --text-dim: #625873;
+  --accent: #6a43a8;
+  --accent-hover: #56348c;
+  --accent-contrast: #ffffff;
+  --user-bg: #ece4f7;
+  --assistant-bg: #f8f6fc;
+  --tool-bg: #f3eff9;
+  --bg-subtle: rgba(60,30,110,0.04);
+}
+
+html[data-theme="ember"],
+[data-theme="ember"] {
+  color-scheme: dark;
+  --bg: #1f1a16;
+  --bg-panel: #28211c;
+  --bg-hover: #322a23;
+  --bg-selected: #3d332b;
+  --border: #5a4a3d;
+  --text: #ede4da;
+  --text-muted: #cfc0b0;
+  --text-dim: #bba996;
+  --accent: #e8b27a;
+  --accent-hover: #f2cba0;
+  --accent-contrast: #2b1a0c;
+  --user-bg: #33291f;
+  --assistant-bg: #1f1a16;
+  --tool-bg: #251f1a;
+  --bg-subtle: rgba(245,220,190,0.04);
+}
+
 /* High contrast: every text token reaches WCAG AAA (7:1) on every surface. */
 [data-theme="contrast-light"] {
   color-scheme: light;
