@@ -1603,51 +1603,79 @@
   margin: 6px 0 0;
 }
 
+/* System spans the first row, split light | dark; light themes below, dark under them. */
 .settings-theme-options {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 3px;
-  width: 100%;
-  max-width: 420px;
-  padding: 3px;
+  grid-template-columns: repeat(4, minmax(0, 76px));
+  grid-auto-rows: 40px;
+  gap: 10px;
+  padding: 4px;
 }
 
 .settings-theme-option {
   position: relative;
   display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
   min-width: 0;
-  min-height: 44px;
-  padding: 0 6px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-muted);
+  border-radius: 9px;
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 400;
 }
 
-.settings-theme-option:has(input:checked) {
-  background: var(--bg-selected);
+.settings-theme-option[data-system] {
+  grid-column: 1 / -1;
+}
+
+.settings-theme-swatch {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.settings-theme-fill {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.settings-theme-name {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  overflow: hidden;
   color: var(--accent);
+  font-size: 12px;
   font-weight: 600;
+  white-space: nowrap;
+}
+
+.settings-theme-option[data-system] .settings-theme-name {
+  width: 200%;
+}
+
+.settings-theme-option[data-system] .settings-theme-fill + .settings-theme-fill .settings-theme-name {
+  left: -100%;
 }
 
 .settings-theme-option:not(:has(input:checked)):hover {
-  background: var(--bg-hover);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--border);
+}
+
+.settings-theme-option:has(input:checked) {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
 }
 
 .settings-theme-option:has(input:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
-
-.settings-theme-option-label {
-  min-width: 0;
-  overflow-wrap: anywhere;
+  outline: 2px dashed var(--accent);
+  outline-offset: 6px;
 }
 
 .settings-font-rows {

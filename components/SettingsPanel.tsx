@@ -4,7 +4,6 @@ import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "re
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
 import { THEME_OPTIONS } from "@/lib/theme";
-import { ThemeIcon } from "./ThemeIcon";
 import {
   CHAT_CONTENT_WIDTH_DEFAULT,
   CHAT_CONTENT_WIDTH_MAX,
@@ -179,10 +178,14 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         <div role="radiogroup" aria-label={t("settings.appearance")} className="settings-theme-options">
           {THEME_OPTIONS.map((option) => {
             const selected = preference === option.id;
+            // Each fill carries its palette's data-theme, so it paints with that theme's own variables.
+            // System's two halves each hold the whole name, clipped at the seam.
+            const fills = option.id === "auto" ? (["light", "dark"] as const) : [option.id];
             return (
               <label
                 key={option.id}
                 className="settings-theme-option"
+                data-system={option.id === "auto" || undefined}
               >
                 <input
                   type="radio"
@@ -192,8 +195,14 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
                   onChange={() => setThemePreference(option.id)}
                   className="sr-only"
                 />
-                <ThemeIcon preference={option.id} />
-                <span className="settings-theme-option-label">{t(option.label)}</span>
+                <span className="settings-theme-swatch" aria-hidden="true">
+                  {fills.map((fill) => (
+                    <span key={fill} data-theme={fill} className="settings-theme-fill">
+                      <span className="settings-theme-name">{t(option.label)}</span>
+                    </span>
+                  ))}
+                </span>
+                <span className="sr-only">{t(option.label)}</span>
               </label>
             );
           })}
