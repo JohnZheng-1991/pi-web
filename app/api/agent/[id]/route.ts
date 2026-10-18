@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession, setRpcSessionTools } from "@/lib/rpc-manager";
+import { hasUnsettledSubagentRun } from "@/lib/subagent-runtime";
 
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
@@ -77,15 +78,17 @@ export async function GET(
   const { id } = await params;
 
   try {
+    // A subagent's end can start a turn here even with no wrapper open now.
+    const subagentsActive = hasUnsettledSubagentRun(id);
     const session = getRpcSession(id);
     if (!session || !session.isAlive()) {
-      return NextResponse.json({ running: false });
+      return NextResponse.json({ running: false, subagentsActive });
     }
 
     const state = await session.send({ type: "get_state" }) as Record<string, unknown>;
     // Status reads leave out the system prompt, most of the reply (agentStatusUrl()).
     if (new URL(req.url).searchParams.get("systemPrompt") === "0") delete state.systemPrompt;
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json({ running: true, state, subagentsActive });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

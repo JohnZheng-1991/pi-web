@@ -28,7 +28,8 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
 import { userMessageKey } from "@/lib/prompt-recovery";
 import { carryMessageKeys, messageRenderKeys } from "@/lib/message-keys";
-import { AgentEventConnection } from "@/lib/agent-event-connection";
+import { AgentEventConnection, canReleaseHiddenEventStream, type AgentIdleCheckReply } from "@/lib/agent-event-connection";
+import { HIDDEN_PAGE_GRACE_MS } from "@/hooks/usePageHidden";
 import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import { CODEMODE_TOOL_NAME, getCodemodeProgress } from "@/lib/codemode-view";
@@ -414,6 +415,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventStreamGraceGenerationRef = useRef(0);
   const eventStreamGraceActiveRef = useRef(false);
+  // True while a hidden page has let go of the selected session's idle stream
+  // (HTTP/1.1 allows a browser six connections per origin, shared by its tabs);
+  // the count moves on with every release, so a lease renewal that straddles
+  // one says nothing about the stream open now.
+  const eventStreamReleasedRef = useRef(false);
+  const eventStreamReleaseCountRef = useRef(0);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const sessionPropIdRef = useRef<string | null>(session?.id ?? null);
   // False while the session carries no tool selection of its own, so its loadout
@@ -486,7 +493,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         && (
           agentRunningRef.current
           || eventStreamGraceActiveRef.current
-          || sessionPropIdRef.current === sid
+          || (sessionPropIdRef.current === sid && !eventStreamReleasedRef.current)
         )
       ),
       readinessTimeoutMs: EVENT_STREAM_READY_TIMEOUT_MS,
@@ -1053,6 +1060,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // so without re-asserting it here shouldMaintain() refuses the connection
     // and the selected session never opens its event stream.
     sessionHookMountedRef.current = true;
+    eventStreamReleasedRef.current = false;
     maintainEventsConnected(sid);
     return () => {
       if (sessionIdRef.current === sid) eventConnectionRef.current?.close();
@@ -1066,8 +1074,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let renewing = false;
 
     const renewLease = async () => {
-      if (disposed || renewing) return;
+      if (disposed || renewing || eventStreamReleasedRef.current) return;
       renewing = true;
+      const releaseCount = eventStreamReleaseCountRef.current;
       try {
         const response = await fetch(`/api/agent/${encodeURIComponent(sid)}/lease`, {
           method: "POST",
@@ -1078,6 +1087,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (
           !disposed
           && result.renewed === 0
+          && releaseCount === eventStreamReleaseCountRef.current
           && sessionIdRef.current === sid
           && sessionPropIdRef.current === sid
         ) {
@@ -1093,7 +1103,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
     const interval = setInterval(() => void renewLease(), SESSION_LEASE_RENEW_INTERVAL_MS);
     const onVisible = () => {
-      if (document.visibilityState === "visible") void renewLease();
+      // A released stream is reopened by the return path (below), with its own lease.
+      if (document.visibilityState === "visible" && !eventStreamReleasedRef.current) void renewLease();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
@@ -1102,6 +1113,71 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [closeEvents, maintainEventsConnected, session?.id]);
+
+  // A page hidden for HIDDEN_PAGE_GRACE_MS lets go of the selected session's
+  // stream while nothing needs it (#1283): each one holds a browser connection,
+  // and over HTTP/1.1 a few background tabs exhaust the six per origin, so every
+  // other request (Settings, message sync) queues in the browser until a tab
+  // closes. A run, a `!` command, a compaction or an open extension dialog keeps
+  // it, and so does whatever the server still reports under way when the grace
+  // ends (canReleaseHiddenEventStream(): a run another tab started, a subagent
+  // whose end starts a turn here); the check repeats each grace while hidden.
+  // A run that settles while hidden starts the grace again, which also covers
+  // extension follow-ups right after prompt_done.
+  const eventStreamIdle = !agentRunning && !bashRunning && !isCompacting
+    && extensionDialogs.length === 0 && extensionCustomUis.length === 0;
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid || !eventStreamIdle) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const releasable = () => (
+      !disposed
+      && document.visibilityState === "hidden"
+      && !eventStreamReleasedRef.current
+      && sessionIdRef.current === sid
+      && sessionPropIdRef.current === sid
+      && !agentRunningRef.current
+      && !bashRunningRef.current
+    );
+    const check = async () => {
+      timer = null;
+      if (!releasable()) return;
+      let reply: AgentIdleCheckReply | null = null;
+      try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
+        if (res.ok) reply = await res.json() as AgentIdleCheckReply;
+      } catch {
+        // Keep the stream; the next grace checks again.
+      }
+      if (!releasable()) return;
+      if (!canReleaseHiddenEventStream(reply)) {
+        arm();
+        return;
+      }
+      eventStreamReleasedRef.current = true;
+      eventStreamReleaseCountRef.current += 1;
+      closeEvents();
+    };
+    const arm = () => {
+      timer ??= setTimeout(() => void check(), HIDDEN_PAGE_GRACE_MS);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        arm();
+      } else if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+    };
+    if (document.visibilityState === "hidden") arm();
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [closeEvents, eventStreamIdle, session?.id]);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -2522,6 +2598,60 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [scrollToBottom]);
 
+  // What a session read with its state (`loadSession(…, includeState)`) says is
+  // under way on the server: a run or command, a `!` command, a compaction. The
+  // mount and a hidden page's return show it the same way.
+  const applyLoadedAgentState = useCallback((sid: string, loadedAgentState: unknown) => {
+    const agentState = loadedAgentState as { running: boolean; state?: AgentStateResponse } | null;
+    if (agentState?.running) {
+      loadTools(sid);
+      if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
+        sdkAgentActiveRef.current = Boolean(agentState.state.isStreaming);
+        rpcPromptPendingRef.current = Boolean(agentState.state.isPromptRunning);
+        agentRunningRef.current = true;
+        setAgentRunning(true);
+        setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
+        dispatch({ type: "resume" });
+        if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
+          void waitForPromptSettlement(sid);
+        }
+      }
+      if (agentState.state?.isBashRunning) {
+        bashRunningRef.current = true;
+        setBashRunning(true);
+        void waitForBashSettlement(sid);
+      }
+    }
+    if (agentState?.state) {
+      if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
+      if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
+      if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
+      if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
+      if (agentState.state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(agentState.state.queuedMessages));
+    }
+  }, [dispatch, loadTools, waitForBashSettlement, waitForPromptSettlement]);
+
+  // Back from a hidden page that let go of the stream: open it again and read
+  // what it missed (a run another tab, a device or an extension started or
+  // finished, statuses), shown as the mount shows it. `connected` resumes a
+  // streaming run as well. Nothing is resent.
+  useEffect(() => {
+    const sid = session?.id;
+    if (!sid) return;
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || !eventStreamReleasedRef.current) return;
+      eventStreamReleasedRef.current = false;
+      if (!sessionHookMountedRef.current || sessionIdRef.current !== sid || sessionPropIdRef.current !== sid) return;
+      maintainEventsConnected(sid);
+      void loadSession(sid, false, true).then((loadedAgentState) => {
+        if (!sessionHookMountedRef.current || sessionIdRef.current !== sid) return;
+        applyLoadedAgentState(sid, loadedAgentState);
+      });
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [applyLoadedAgentState, loadSession, maintainEventsConnected, session?.id]);
+
   // Load session on mount
   useEffect(() => {
     sessionHookMountedRef.current = true;
@@ -2562,33 +2692,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setLoading(false);
       }
       loadSession(session.id, !cached, true, { force: true }).then((loadedAgentState) => {
-        const agentState = loadedAgentState as { running: boolean; state?: AgentStateResponse } | null;
-        if (agentState?.running) {
-          loadTools(session.id);
-          if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
-            sdkAgentActiveRef.current = Boolean(agentState.state.isStreaming);
-            rpcPromptPendingRef.current = Boolean(agentState.state.isPromptRunning);
-            agentRunningRef.current = true;
-            setAgentRunning(true);
-            setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
-            dispatch({ type: "resume" });
-            if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
-              void waitForPromptSettlement(session.id);
-            }
-          }
-          if (agentState.state?.isBashRunning) {
-            bashRunningRef.current = true;
-            setBashRunning(true);
-            void waitForBashSettlement(session.id);
-          }
-        }
-        if (agentState?.state) {
-          if (agentState.state.isCompacting !== undefined) setIsCompacting(agentState.state.isCompacting);
-          if (agentState.state.systemPrompt !== undefined) setSystemPrompt(agentState.state.systemPrompt ?? null);
-          if (agentState.state.extensionStatuses !== undefined) setExtensionStatuses(agentState.state.extensionStatuses ?? []);
-          if (agentState.state.extensionWidgets !== undefined) setExtensionWidgets(agentState.state.extensionWidgets ?? []);
-          if (agentState.state.queuedMessages !== undefined) setQueuedMessages(normalizeQueuedMessages(agentState.state.queuedMessages));
-        }
+        applyLoadedAgentState(session.id, loadedAgentState);
       });
     }
     return () => {

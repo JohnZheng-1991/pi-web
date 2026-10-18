@@ -148,6 +148,26 @@ function getSubagentRuns(): Map<string, StoredSubagentExecution> {
   return globalThis.__piSubagentRuns;
 }
 
+/**
+ * Whether a subagent run under this session, at any depth, is still unsettled: its end can
+ * start a turn there (`notifyParent()`, `triggerTurn`). A run leaves the map once its result is
+ * written, so every entry counts. A hidden page keeps the session's event stream while this
+ * holds (#1283).
+ */
+export function hasUnsettledSubagentRun(sessionId: string): boolean {
+  const runs = [...getSubagentRuns().values()].map((stored) => stored.run);
+  const family = new Set([sessionId]);
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const run of runs) {
+      if (!family.has(run.parentSessionId) || family.has(run.sessionId)) continue;
+      family.add(run.sessionId);
+      grew = true;
+    }
+  }
+  return family.size > 1;
+}
+
 function getSubagentQueue(): SubagentQueue<SubagentRunInfo> {
   if (!globalThis.__piSubagentQueue) globalThis.__piSubagentQueue = new SubagentQueue();
   return globalThis.__piSubagentQueue;

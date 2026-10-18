@@ -200,3 +200,28 @@ export class AgentEventConnection {
     this.retry = null;
   }
 }
+
+/** What `GET /api/agent/[id]` answers, as far as a hidden page's release reads it. */
+export interface AgentIdleCheckReply {
+  running?: boolean;
+  subagentsActive?: boolean;
+  state?: {
+    isStreaming?: boolean;
+    isPromptRunning?: boolean;
+    isBashRunning?: boolean;
+    isCompacting?: boolean;
+  };
+}
+
+/**
+ * Whether a page hidden past its grace may close the selected session's stream (#1283): only
+ * when the server reports nothing under way there (a run or command another tab started, a
+ * `!` command, a compaction) and no subagent of the session left to finish, since a subagent's
+ * end starts a turn in it. No reply (a failed read) keeps the stream.
+ */
+export function canReleaseHiddenEventStream(reply: AgentIdleCheckReply | null | undefined): boolean {
+  if (!reply || reply.subagentsActive) return false;
+  const state = reply.state;
+  return !(reply.running && state
+    && (state.isStreaming || state.isPromptRunning || state.isBashRunning || state.isCompacting));
+}
