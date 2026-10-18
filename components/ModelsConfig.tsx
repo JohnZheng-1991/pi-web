@@ -18,6 +18,7 @@ import {
   savedModelIds,
   serializeHeaderRows,
   setCompatBool,
+  setCompatFlag,
   trackAddedModels,
   collectModelRenames,
   renameProviderEntry,
@@ -94,6 +95,7 @@ interface ModelEntry {
   id: string;
   name?: string;
   api?: string;
+  baseUrl?: string;
   reasoning?: boolean;
   thinkingLevelMap?: Record<string, string | null>;
   input?: string[];
@@ -425,17 +427,11 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
       <Field label="Base URL">
         <TextInput value={provider.baseUrl ?? ""} onChange={(v) => set("baseUrl", v || undefined)}
           placeholder="https://api.example.com/v1" mono />
-        <span style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
-          Leave empty for a built-in provider to use the endpoint pi ships
-        </span>
       </Field>
 
       <Field label="API Key">
         <SecretTextInput value={provider.apiKey ?? ""} onChange={(v) => set("apiKey", v || undefined)}
-          placeholder="ENV_VAR_NAME, !shell-command, or literal key" mono />
-        <span style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
-          Prefix with <code style={{ fontFamily: "var(--font-mono)" }}>!</code> to run a shell command, or use an env var name
-        </span>
+          placeholder={t("models.apiKeyPlaceholder")} mono />
       </Field>
 
       <Field label="API">
@@ -447,9 +443,6 @@ function ProviderDetail({ name, editingName, provider, onChange, onEditingNameCh
           headers={provider.headers}
           onChange={(headers) => set("headers", headers)}
         />
-        <span style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 2 }}>
-          Added to every request from this provider (e.g. User-Agent). Useful for gateways with bot detection.
-        </span>
       </Field>
 
       <div style={{ borderTop: "1px solid var(--border)", paddingTop: 14, display: "flex", flexDirection: "column", gap: 10 }}>
@@ -843,6 +836,8 @@ function ModelDetail({
   const [costDraft, setCostDraft] = useState<ModelCostDraft>(() => modelCostToDraft(model.cost));
   const costDraftRef = useRef(costDraft);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const testRequestIdRef = useRef(0);
+  const effectiveBaseUrl = model.baseUrl ?? provider.baseUrl;
   const catalogRequestIdRef = useRef(0);
   const catalogUndoRef = useRef<ModelEntry | null>(null);
   const costTemplateRef = useRef(model.cost);
@@ -886,17 +881,21 @@ function ModelDetail({
   })();
 
   useEffect(() => {
+    testRequestIdRef.current += 1;
     setTestState({ phase: "idle" });
-  }, [providerName, provider.baseUrl, provider.api, provider.apiKey, model.id, model.api]);
+    // An in-flight result belongs to the old draft, including after unmount.
+    return () => { testRequestIdRef.current += 1; };
+  }, [providerName, provider, model]);
 
   useEffect(() => {
     catalogRequestIdRef.current += 1;
     setCatalogState({ phase: "idle" });
     catalogUndoRef.current = null;
-  }, [providerName, provider.baseUrl, model.id]);
+  }, [providerName, effectiveBaseUrl, model.id]);
 
   const handleTest = useCallback(async () => {
     if (!model.id.trim() || testState.phase === "testing") return;
+    const requestId = ++testRequestIdRef.current;
     setTestState({ phase: "testing" });
     try {
       const res = await fetch("/api/models-config/test", {
@@ -911,6 +910,7 @@ function ModelDetail({
         status?: number;
         responseText?: string;
       };
+      if (requestId !== testRequestIdRef.current) return;
       if (!res.ok || !d.ok) {
         setTestState({
           phase: "error",
@@ -927,6 +927,7 @@ function ModelDetail({
         responseText: d.responseText,
       });
     } catch (e) {
+      if (requestId !== testRequestIdRef.current) return;
       setTestState({ phase: "error", message: e instanceof Error ? e.message : String(e) });
     }
   }, [model, provider, providerName, testState.phase]);
@@ -938,7 +939,7 @@ function ModelDetail({
     setCatalogState({ phase: "loading" });
     try {
       const params = new URLSearchParams({ q: query, provider: providerName, limit: "50" });
-      if (provider.baseUrl?.trim()) params.set("baseUrl", provider.baseUrl.trim());
+      if (effectiveBaseUrl?.trim()) params.set("baseUrl", effectiveBaseUrl.trim());
       const res = await fetch(`/api/models-config/catalog?${params}`);
       const data = await res.json() as { recommendation?: ModelCatalogRecommendation; error?: string };
       if (requestId !== catalogRequestIdRef.current) return;
@@ -961,7 +962,7 @@ function ModelDetail({
       if (requestId !== catalogRequestIdRef.current) return;
       setCatalogState({ phase: "error", message: error instanceof Error ? error.message : String(error) });
     }
-  }, [catalogState.phase, model, onChange, provider.baseUrl, providerName]);
+  }, [catalogState.phase, model, onChange, effectiveBaseUrl, providerName]);
 
   const undoCatalogFill = () => {
     const previous = catalogUndoRef.current;
@@ -1024,6 +1025,7 @@ function ModelDetail({
   }
   compatibilityOverrideCount += remainingCompatKeys.size;
   const advancedSummaryParts = [
+    model.baseUrl ? t("models.baseUrlOverride") : null,
     model.api ? `API: ${model.api}` : null,
     Object.keys(model.headers ?? {}).length
       ? t("models.headersSummary", { count: Object.keys(model.headers ?? {}).length })
@@ -1248,6 +1250,11 @@ function ModelDetail({
 
         {advancedOpen && (
           <div id="model-advanced-settings" style={{ display: "flex", flexDirection: "column", gap: 14, padding: "4px 0 16px" }}>
+            <Field label={t("models.baseUrlOverride")}>
+              <TextInput value={model.baseUrl ?? ""} onChange={(v) => set("baseUrl", v.trim() || undefined)}
+                placeholder={provider.baseUrl ?? t("models.providerDefaults")} mono />
+            </Field>
+
             <Field label={t("models.apiOverride")}>
               <Select value={model.api ?? ""} onChange={(v) => set("api", v || undefined)} options={API_OPTIONS} />
             </Field>
@@ -1275,6 +1282,18 @@ function ModelDetail({
                   checked={effectiveCompat(provider, model)["supportsDeveloperRole"] !== false}
                   onChange={(v) => onChange(setCompatBool(model, "supportsDeveloperRole", v))}
                 />
+                {(model.api ?? provider.api) === "anthropic-messages" && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                    <Check
+                      label={t("models.adaptiveThinking")}
+                      checked={effectiveCompat(provider, model)["forceAdaptiveThinking"] === true}
+                      onChange={(v) => onChange(setCompatFlag(model, "forceAdaptiveThinking", v, provider.compat?.["forceAdaptiveThinking"] === true))}
+                    />
+                    <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", paddingLeft: 19 }}>
+                      compat.forceAdaptiveThinking
+                    </code>
+                  </div>
+                )}
                 <div style={{ marginTop: 4 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
                     <SectionTitle>{t("models.thinkingLevelMap")}</SectionTitle>
@@ -2277,11 +2296,11 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
         </ConfigSplitView>
 
         {/* Footer */}
-        <ConfigFooter status={(loadError || saveError) && (
+        <ConfigFooter status={(loadError || saveError) ? (
           <span style={{ color: "#f87171" }}>
             {loadError ? t("models.configUnreadable", { error: loadError }) : saveError}
           </span>
-        )}>
+        ) : t("models.applyHelp")}>
           {!embedded && <ConfigButton onClick={onClose}>{t("i18n.cancel")}</ConfigButton>}
           <ConfigButton
             variant="primary"
