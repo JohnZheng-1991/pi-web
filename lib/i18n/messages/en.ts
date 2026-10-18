@@ -1357,6 +1357,8 @@ export const enLocale: LocalePlugin = {
     "models.compatibility": "Compatibility",
     "models.deepSeekThinkingCompat": "DeepSeek thinking compatibility",
     "models.developerRole": "Use the developer role for the system prompt",
+    "models.adaptiveThinking": "Claude adaptive thinking (effort levels)",
+    "models.adaptiveThinkingHelp": "For Claude 4.6 and later, as pi requests its built-in Claude models. Sends an effort level instead of a thinking token budget: with a budget these models may return no thinking text, and a long silent thinking phase can be cut off by the gateway.",
     "models.thinkingLevelMap": "Thinking level map",
     "models.clearAll": "Clear all",
     "models.enabledSection": "Available models",
