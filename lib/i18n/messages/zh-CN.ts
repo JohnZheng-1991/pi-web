@@ -1358,7 +1358,6 @@ export const zhCNLocale: LocalePlugin = {
     "models.deepSeekThinkingCompat": "DeepSeek 思考兼容",
     "models.developerRole": "使用 developer role 传递系统提示词",
     "models.adaptiveThinking": "Claude 自适应思考（effort 等级）",
-    "models.adaptiveThinkingHelp": "适用于 Claude 4.6 及以后的模型，pi 内置的 Claude 模型也这样请求。发送 effort 等级而不是思考 token 预算：用预算时这些模型可能不返回思考内容，长时间没有输出的思考可能被网关断开。",
     "models.thinkingLevelMap": "思考等级映射",
     "models.clearAll": "全部清除",
     "models.enabledSection": "可用模型",

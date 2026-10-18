@@ -1282,9 +1282,9 @@ function ModelDetail({
                       checked={effectiveCompat(provider, model)["forceAdaptiveThinking"] === true}
                       onChange={(v) => onChange(setCompatFlag(model, "forceAdaptiveThinking", v, provider.compat?.["forceAdaptiveThinking"] === true))}
                     />
-                    <span style={{ fontSize: 10, color: "var(--text-dim)", paddingLeft: 19 }}>
-                      {t("models.adaptiveThinkingHelp")}
-                    </span>
+                    <code style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", paddingLeft: 19 }}>
+                      compat.forceAdaptiveThinking
+                    </code>
                   </div>
                 )}
                 <div style={{ marginTop: 4 }}>
