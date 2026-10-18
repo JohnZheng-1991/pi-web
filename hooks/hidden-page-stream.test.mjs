@@ -45,7 +45,9 @@ async function setup() {
       this.onmessage?.({ data: JSON.stringify(event) });
     }
   };
-  globalThis.fetch = async (url, init = {}) => {
+  globalThis.fetch = async (requestUrl, init = {}) => {
+    // Status reads (agentStatusUrl()) leave out the system prompt; same route.
+    const url = requestUrl === "/api/agent/s1?systemPrompt=0" ? "/api/agent/s1" : requestUrl;
     requests.push(url);
     if (url.startsWith("/api/models")) return json({ models: {}, modelList: [] });
     if (url.startsWith("/api/sessions/s1?")) {

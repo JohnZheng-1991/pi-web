@@ -1152,7 +1152,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), HIDDEN_RELEASE_CHECK_TIMEOUT_MS);
       try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { signal: controller.signal });
+        const res = await fetch(agentStatusUrl(sid), { signal: controller.signal });
         reply = res.ok ? await res.json() as AgentIdleCheckReply : null;
       } catch (error) {
         // Timed out (queued behind the open streams) or no network: let go. A body
