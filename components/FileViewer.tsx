@@ -1401,7 +1401,8 @@ function TextFileViewer({
       setWatching(true);
       // The server emits connected only after its watcher exists. Reading now
       // closes the gap between the last snapshot and live events, unless the
-      // file on screen is still the one on disk (a reconnect).
+      // file on screen is still the one on disk (a reconnect). The diff is read
+      // again either way: a commit made meanwhile changes it, not the file.
       const shown = shownVersionRef.current;
       if (shown === null) {
         synchronize();
@@ -1410,7 +1411,9 @@ function TextFileViewer({
       fetch(getFileApiUrl(filePath, "meta", sourceSessionId))
         .then((response) => response.json())
         .then((meta: { size?: number; mtime?: string }) => {
-          if (active && fileVersionChanged(shownVersionRef.current, fileVersion(meta))) synchronize();
+          if (!active) return;
+          if (fileVersionChanged(shownVersionRef.current, fileVersion(meta))) synchronize();
+          else void fetchGitDiff(filePath);
         })
         .catch(() => {
           if (active) synchronize();

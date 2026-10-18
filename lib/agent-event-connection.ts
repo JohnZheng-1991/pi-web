@@ -214,12 +214,21 @@ export interface AgentIdleCheckReply {
 }
 
 /**
+ * How long a hidden page waits for that check. Over HTTP/1.1 a check queued behind six open
+ * streams never leaves the browser, so no answer in time reads as a starved pool.
+ */
+export const HIDDEN_RELEASE_CHECK_TIMEOUT_MS = 5_000;
+
+/**
  * Whether a page hidden past its grace may close the selected session's stream (#1283): only
  * when the server reports nothing under way there (a run or command another tab started, a
  * `!` command, a compaction) and no subagent of the session left to finish, since a subagent's
- * end starts a turn in it. No reply (a failed read) keeps the stream.
+ * end starts a turn in it. `"unanswered"` (no reply within HIDDEN_RELEASE_CHECK_TIMEOUT_MS, or
+ * no network) releases: the pool is starved, which is what the release is for, or the stream is
+ * down anyway. `null` (the server answered with an error) keeps the stream until the next check.
  */
-export function canReleaseHiddenEventStream(reply: AgentIdleCheckReply | null | undefined): boolean {
+export function canReleaseHiddenEventStream(reply: AgentIdleCheckReply | "unanswered" | null | undefined): boolean {
+  if (reply === "unanswered") return true;
   if (!reply || reply.subagentsActive) return false;
   const state = reply.state;
   return !(reply.running && state

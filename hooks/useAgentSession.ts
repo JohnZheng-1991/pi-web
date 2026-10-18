@@ -28,7 +28,12 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
 import { userMessageKey } from "@/lib/prompt-recovery";
 import { carryMessageKeys, messageRenderKeys } from "@/lib/message-keys";
-import { AgentEventConnection, canReleaseHiddenEventStream, type AgentIdleCheckReply } from "@/lib/agent-event-connection";
+import {
+  AgentEventConnection,
+  canReleaseHiddenEventStream,
+  HIDDEN_RELEASE_CHECK_TIMEOUT_MS,
+  type AgentIdleCheckReply,
+} from "@/lib/agent-event-connection";
 import { HIDDEN_PAGE_GRACE_MS } from "@/hooks/usePageHidden";
 import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
@@ -1143,12 +1148,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const check = async () => {
       timer = null;
       if (!releasable()) return;
-      let reply: AgentIdleCheckReply | null = null;
+      let reply: AgentIdleCheckReply | "unanswered" | null = null;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), HIDDEN_RELEASE_CHECK_TIMEOUT_MS);
       try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
-        if (res.ok) reply = await res.json() as AgentIdleCheckReply;
-      } catch {
-        // Keep the stream; the next grace checks again.
+        const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`, { signal: controller.signal });
+        reply = res.ok ? await res.json() as AgentIdleCheckReply : null;
+      } catch (error) {
+        // Timed out (queued behind the open streams) or no network: let go. A body
+        // that is no JSON counts as an error reply, checked again next grace.
+        reply = controller.signal.aborted || error instanceof TypeError ? "unanswered" : null;
+      } finally {
+        clearTimeout(timeout);
       }
       if (!releasable()) return;
       if (!canReleaseHiddenEventStream(reply)) {

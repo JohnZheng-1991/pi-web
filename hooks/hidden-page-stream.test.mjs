@@ -13,7 +13,7 @@ const jiti = createJiti(import.meta.url, { tsconfigPaths: true, alias: { react: 
 const { renderHook } = await import(shimPath);
 const { useAgentSession } = await jiti.import("./useAgentSession.ts");
 const { HIDDEN_PAGE_GRACE_MS } = await jiti.import("./usePageHidden.ts");
-const { canReleaseHiddenEventStream } = await jiti.import("../lib/agent-event-connection.ts");
+const { canReleaseHiddenEventStream, HIDDEN_RELEASE_CHECK_TIMEOUT_MS } = await jiti.import("../lib/agent-event-connection.ts");
 
 const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
 globalThis.document = page;
@@ -31,7 +31,9 @@ async function setup() {
   const sources = [];
   const requests = [];
   // What GET /api/agent/s1 and the session's state read report; tests change it.
-  const server = { running: true, state: { isStreaming: false, isPromptRunning: false }, subagentsActive: false };
+  // `answer` turns the idle check into one that never answers (it only ends when
+  // aborted), a network failure or an HTTP error.
+  const server = { running: true, state: { isStreaming: false, isPromptRunning: false }, subagentsActive: false, answer: "json" };
   globalThis.EventSource = class {
     readyState = 0;
     onmessage = null;
@@ -52,6 +54,13 @@ async function setup() {
     if (url === "/api/sessions/s1/state") return json({ running: server.running, state: server.state });
     if (url === "/api/agent/s1/lease") return json({ success: true, renewed: 1 });
     if (url === "/api/agent/s1" && init.body) return json({ success: true, data: null });
+    if (url === "/api/agent/s1" && server.answer === "never") {
+      return new Promise((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }
+    if (url === "/api/agent/s1" && server.answer === "offline") throw new TypeError("Failed to fetch");
+    if (url === "/api/agent/s1" && server.answer === "error") return new Response("boom", { status: 500 });
     if (url === "/api/agent/s1") return json(server);
     return json({});
   };
@@ -147,6 +156,50 @@ test("a subagent left to finish keeps the stream, checked again each grace", asy
   }
 });
 
+test("a check that never answers (queued behind a full pool) releases once it times out", async () => {
+  const state = await setup();
+  try {
+    await connectIdle(state);
+    state.server.answer = "never";
+    state.hide();
+    await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(state.checks(), 1);
+    assert.equal(state.open().length, 1, "still waiting for the answer");
+    await state.tick(HIDDEN_RELEASE_CHECK_TIMEOUT_MS);
+    assert.equal(state.open().length, 0, "no answer in time reads as a starved pool");
+    assert.equal(state.checks(), 1);
+  } finally {
+    await teardown(state);
+  }
+});
+
+test("no network releases; an error reply keeps the stream and checks again", async () => {
+  const offline = await setup();
+  try {
+    await connectIdle(offline);
+    offline.server.answer = "offline";
+    offline.hide();
+    await offline.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(offline.open().length, 0);
+  } finally {
+    await teardown(offline);
+  }
+  const failing = await setup();
+  try {
+    await connectIdle(failing);
+    failing.server.answer = "error";
+    failing.hide();
+    await failing.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(failing.open().length, 1);
+    failing.server.answer = "json";
+    await failing.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(failing.checks(), 2);
+    assert.equal(failing.open().length, 0);
+  } finally {
+    await teardown(failing);
+  }
+});
+
 test("a running session keeps its stream while hidden and lets go a grace after it settles", async () => {
   const state = await setup();
   try {
@@ -235,5 +288,6 @@ test("only a reply with nothing under way and no subagent left releases", () => 
   for (const busy of ["isStreaming", "isPromptRunning", "isBashRunning", "isCompacting"]) {
     assert.equal(canReleaseHiddenEventStream({ running: true, state: { [busy]: true } }), false, busy);
   }
-  assert.equal(canReleaseHiddenEventStream(null), false, "a failed read keeps the stream");
+  assert.equal(canReleaseHiddenEventStream(null), false, "an error reply keeps the stream");
+  assert.equal(canReleaseHiddenEventStream("unanswered"), true, "no answer in time (a starved pool) or no network releases");
 });
