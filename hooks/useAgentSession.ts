@@ -241,6 +241,14 @@ const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_READY_TIMEOUT_MS = 60_000;
 const EVENT_STREAM_RECONNECT_DELAY_MS = 1_000;
 const SESSION_LEASE_RENEW_INTERVAL_MS = 30_000;
+// This page's id for the lease it holds in place of a released stream's (holdSessionLivenessLease()).
+let pageLeaseHolder: string | null = null;
+function sessionLeaseUrl(sid: string, hold: boolean): string {
+  const url = `/api/agent/${encodeURIComponent(sid)}/lease`;
+  if (!hold) return url;
+  pageLeaseHolder ??= `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  return `${url}?holder=${pageLeaseHolder}`;
+}
 // Retry temporary model-list failures without requiring a page refresh.
 const MODELS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 const MAX_NOTICES = 5;
@@ -1079,15 +1087,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let renewing = false;
 
     const renewLease = async () => {
-      if (disposed || renewing || eventStreamReleasedRef.current) return;
+      if (disposed || renewing) return;
       renewing = true;
+      // A released stream took its lease along; the page holds one of its own instead, so the
+      // idle wrapper (and an extension's timer in it) lives on as long as with the stream.
+      const held = eventStreamReleasedRef.current;
       const releaseCount = eventStreamReleaseCountRef.current;
       try {
-        const response = await fetch(`/api/agent/${encodeURIComponent(sid)}/lease`, {
+        const response = await fetch(sessionLeaseUrl(sid, held), {
           method: "POST",
           cache: "no-store",
         });
-        if (!response.ok || disposed) return;
+        if (!response.ok || disposed || held) return;
         const result = await response.json() as { renewed?: number };
         if (
           !disposed
@@ -1169,6 +1180,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       eventStreamReleasedRef.current = true;
       eventStreamReleaseCountRef.current += 1;
       closeEvents();
+      void fetch(sessionLeaseUrl(sid, true), { method: "POST", cache: "no-store" }).catch(() => {});
     };
     const arm = () => {
       timer ??= setTimeout(() => void check(), HIDDEN_PAGE_GRACE_MS);

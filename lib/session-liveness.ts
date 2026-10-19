@@ -170,6 +170,41 @@ export function acquireSessionLivenessLease(sessionId: string): SessionLivenessL
   return lease;
 }
 
+const SESSION_LIVENESS_HOLDS_KEY = "@agegr/pi-web/session-liveness-holds/v1";
+
+function getHoldStore(): Map<string, { lease: SessionLivenessLease; expiresAt: number }> {
+  const store = globalThis as Record<PropertyKey, unknown>;
+  const key = Symbol.for(SESSION_LIVENESS_HOLDS_KEY);
+  const existing = store[key];
+  if (existing instanceof Map) return existing as Map<string, { lease: SessionLivenessLease; expiresAt: number }>;
+  const holds = new Map<string, { lease: SessionLivenessLease; expiresAt: number }>();
+  store[key] = holds;
+  return holds;
+}
+
+/**
+ * Keep a session selected in a page that let go of its event stream (#1283) as alive as the
+ * stream's lease did: one lease per page and session, renewed by each call and ended a TTL after
+ * the page stops calling. Without it the idle wrapper is reaped, and an extension's timer with it.
+ */
+export function holdSessionLivenessLease(sessionId: string, holder: string): void {
+  const holds = getHoldStore();
+  const key = `${holder}\n${sessionId}`;
+  const now = Date.now();
+  for (const [heldKey, held] of holds) {
+    if (held.expiresAt > now) continue;
+    holds.delete(heldKey);
+    held.lease.release();
+  }
+  const held = holds.get(key);
+  if (held) {
+    held.lease.renew();
+  } else {
+    holds.set(key, { lease: acquireSessionLivenessLease(sessionId), expiresAt: 0 });
+  }
+  holds.get(key)!.expiresAt = now + SESSION_LIVENESS_LEASE_TTL_MS;
+}
+
 /** Renew every live browser lease for a session; expired leases are ignored. */
 export function renewSessionLivenessLeases(sessionId: string): number {
   const leases = getLeaseStore().get(sessionId);

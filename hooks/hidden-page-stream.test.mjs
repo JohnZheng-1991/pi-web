@@ -120,6 +120,32 @@ test("a page hidden past the grace closes the idle stream and its return reopens
   }
 });
 
+test("a released page holds the session's lease itself until it returns", async () => {
+  const state = await setup();
+  try {
+    await connectIdle(state);
+    const holds = () => state.requests.filter((url) => /^\/api\/agent\/s1\/lease\?holder=[\w-]+$/.test(url)).length;
+    const renewals = () => state.requests.filter((url) => url === "/api/agent/s1/lease").length;
+    state.hide();
+    await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(state.open().length, 0);
+    assert.equal(holds(), 1, "the stream's lease ended with it: one of the page's own replaces it at once");
+    const renewed = renewals();
+    for (let index = 0; index < 4; index++) await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.ok(holds() >= 4, "renewed while the page stays away, so the idle wrapper is not reaped");
+    assert.equal(renewals(), renewed);
+
+    setVisibility("visible");
+    await settle();
+    const held = holds();
+    for (let index = 0; index < 2; index++) await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(holds(), held, "back with a stream, the stream's lease is renewed again");
+    assert.ok(renewals() > renewed);
+  } finally {
+    await teardown(state);
+  }
+});
+
 test("a quick tab switch keeps the stream and reads nothing", async () => {
   const state = await setup();
   try {
