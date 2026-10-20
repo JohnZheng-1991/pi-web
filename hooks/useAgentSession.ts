@@ -31,8 +31,9 @@ import { carryMessageKeys, messageRenderKeys } from "@/lib/message-keys";
 import {
   AgentEventConnection,
   canReleaseHiddenEventStream,
-  HIDDEN_RELEASE_CHECK_TIMEOUT_MS,
-  type AgentIdleCheckReply,
+  SESSION_LEASE_TIMEOUT_MS,
+  sessionLeaseShowsActivity,
+  type SessionLeaseReply,
 } from "@/lib/agent-event-connection";
 import { HIDDEN_PAGE_GRACE_MS } from "@/hooks/usePageHidden";
 import { AGENT_EVENT_HEARTBEAT_MS, isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
@@ -245,6 +246,7 @@ const SESSION_LEASE_RENEW_INTERVAL_MS = 30_000;
 const EVENT_STREAM_STALE_MS = AGENT_EVENT_HEARTBEAT_MS * 2.5;
 // This page's id for the lease that keeps its selected session alive (holdSessionLivenessLease()).
 let pageLeaseHolder: string | null = null;
+type SessionLeaseOutcome = SessionLeaseReply | "unanswered" | null;
 function sessionLeaseUrl(sid: string): string {
   pageLeaseHolder ??= `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
   return `/api/agent/${encodeURIComponent(sid)}/lease?holder=${pageLeaseHolder}`;
@@ -431,6 +433,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // True while a hidden page has let go of the selected session's idle stream
   // (HTTP/1.1 allows a browser six connections per origin, shared by its tabs).
   const eventStreamReleasedRef = useRef(false);
+  // Moves on each time a released stream is opened again, so the release
+  // effect arms its grace anew for a page still hidden.
+  const [eventStreamReattachCount, setEventStreamReattachCount] = useState(0);
+  // The lease request in flight: the renewal tick and the release check share it.
+  const leaseRequestRef = useRef<{ sid: string; promise: Promise<SessionLeaseOutcome> } | null>(null);
+  const reattachEventStreamRef = useRef<(sid: string) => void>(() => {});
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const sessionPropIdRef = useRef<string | null>(session?.id ?? null);
   // False while the session carries no tool selection of its own, so its loadout
@@ -1079,45 +1087,44 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [maintainEventsConnected, session?.id]);
 
-  // The page keeps its selected session alive with a lease of its own
-  // (holdSessionLivenessLease()), renewed whether or not it holds the event
-  // stream: a hidden page lets go of the stream (#1283), not of the session, so
-  // the idle wrapper and an extension's timer in it live on. A dead stream is
-  // the connection's heartbeat watchdog's to notice (staleAfterMs).
-  useEffect(() => {
-    const sid = session?.id;
-    if (!sid) return;
-    let renewing = false;
-    const renewLease = () => {
-      if (renewing) return;
-      renewing = true;
-      void fetch(sessionLeaseUrl(sid), { method: "POST", cache: "no-store" })
-        .catch(() => { /* renewed on the next tick, well inside the lease's TTL */ })
-        .finally(() => { renewing = false; });
-    };
-    renewLease();
-    const interval = setInterval(renewLease, SESSION_LEASE_RENEW_INTERVAL_MS);
-    // A frozen background page renews nothing; coming back renews at once.
-    const onVisible = () => {
-      if (document.visibilityState === "visible") renewLease();
-    };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [session?.id]);
+  // One lease request (holdSessionLivenessLease()): it keeps the session alive
+  // and reports what is under way there (SessionLeaseReply). A reply that does
+  // not come within SESSION_LEASE_TIMEOUT_MS, or no network, is "unanswered";
+  // an error reply is null.
+  const requestLease = useCallback((sid: string): Promise<SessionLeaseOutcome> => {
+    const pending = leaseRequestRef.current;
+    if (pending?.sid === sid) return pending.promise;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), SESSION_LEASE_TIMEOUT_MS);
+    const request: { sid: string; promise: Promise<SessionLeaseOutcome> } = { sid, promise: Promise.resolve(null) };
+    request.promise = (async (): Promise<SessionLeaseOutcome> => {
+      try {
+        const response = await fetch(sessionLeaseUrl(sid), { method: "POST", cache: "no-store", signal: controller.signal });
+        return response.ok ? await response.json() as SessionLeaseReply : null;
+      } catch (error) {
+        // Timed out (queued behind open streams) or no network. A body that is no
+        // JSON counts as an error reply.
+        return controller.signal.aborted || error instanceof TypeError ? "unanswered" : null;
+      } finally {
+        clearTimeout(timeout);
+        if (leaseRequestRef.current === request) leaseRequestRef.current = null;
+      }
+    })();
+    leaseRequestRef.current = request;
+    return request.promise;
+  }, []);
 
   // A page hidden for HIDDEN_PAGE_GRACE_MS lets go of the selected session's
   // stream while nothing needs it (#1283): each one holds a browser connection,
   // and over HTTP/1.1 a few background tabs exhaust the six per origin, so every
   // other request (Settings, message sync) queues in the browser until a tab
-  // closes. A run, a `!` command, a compaction or an open extension dialog keeps
-  // it, and so does whatever the server still reports under way when the grace
-  // ends (canReleaseHiddenEventStream(): a run another tab started, a subagent
-  // whose end starts a turn here); the check repeats each grace while hidden.
-  // A run that settles while hidden starts the grace again, which also covers
-  // extension follow-ups right after prompt_done.
+  // closes. A run, a `!` command, a compaction or an open extension dialog in the
+  // page keeps it without asking. Otherwise the grace ends with a lease request,
+  // and the stream closes only if its reply shows nothing under way
+  // (canReleaseHiddenEventStream(): a run another tab started, an extension
+  // dialog, a subagent whose end starts a turn here); the check repeats each
+  // grace while hidden. A run that settles while hidden starts the grace again,
+  // which also covers extension follow-ups right after prompt_done.
   const eventStreamIdle = !agentRunning && !bashRunning && !isCompacting
     && extensionDialogs.length === 0 && extensionCustomUis.length === 0;
   useEffect(() => {
@@ -1137,19 +1144,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const check = async () => {
       timer = null;
       if (!releasable()) return;
-      let reply: AgentIdleCheckReply | "unanswered" | null = null;
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), HIDDEN_RELEASE_CHECK_TIMEOUT_MS);
-      try {
-        const res = await fetch(agentStatusUrl(sid), { signal: controller.signal });
-        reply = res.ok ? await res.json() as AgentIdleCheckReply : null;
-      } catch (error) {
-        // Timed out (queued behind the open streams) or no network: let go. A body
-        // that is no JSON counts as an error reply, checked again next grace.
-        reply = controller.signal.aborted || error instanceof TypeError ? "unanswered" : null;
-      } finally {
-        clearTimeout(timeout);
-      }
+      const reply = await requestLease(sid);
       if (!releasable()) return;
       if (!canReleaseHiddenEventStream(reply)) {
         arm();
@@ -1176,7 +1171,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (timer) clearTimeout(timer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [closeEvents, eventStreamIdle, session?.id]);
+  }, [closeEvents, eventStreamIdle, eventStreamReattachCount, requestLease, session?.id]);
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
@@ -2630,26 +2625,54 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [dispatch, loadTools, waitForBashSettlement, waitForPromptSettlement]);
 
-  // Back from a hidden page that let go of the stream: open it again and read
-  // what it missed (a run another tab, a device or an extension started or
-  // finished, statuses), shown as the mount shows it. `connected` resumes a
-  // streaming run as well. Nothing is resent.
+  // Open a released stream again and read what it missed (a run another tab, a
+  // device or an extension started or finished, statuses), shown as the mount
+  // shows it. `connected` resumes a streaming run and replays pending extension
+  // dialogs, so their completion and attention notifications reach the page as
+  // if it had never let go. Nothing is resent.
+  reattachEventStreamRef.current = (sid: string) => {
+    if (!eventStreamReleasedRef.current) return;
+    eventStreamReleasedRef.current = false;
+    setEventStreamReattachCount((count) => count + 1);
+    if (!sessionHookMountedRef.current || sessionIdRef.current !== sid || sessionPropIdRef.current !== sid) return;
+    maintainEventsConnected(sid);
+    void loadSession(sid, false, true).then((loadedAgentState) => {
+      if (!sessionHookMountedRef.current || sessionIdRef.current !== sid) return;
+      applyLoadedAgentState(sid, loadedAgentState);
+    });
+  };
+
+  // The page keeps its selected session alive with a lease of its own, renewed
+  // every SESSION_LEASE_RENEW_INTERVAL_MS whether or not it holds the event
+  // stream: a hidden page lets go of the stream (#1283), not of the session, so
+  // the idle wrapper and an extension's timer in it live on. A released page
+  // reads each reply and opens the stream again as soon as something is under
+  // way (sessionLeaseShowsActivity()); one that comes back opens it at once. A
+  // dead stream is the connection's heartbeat watchdog's to notice.
   useEffect(() => {
     const sid = session?.id;
     if (!sid) return;
-    const onVisible = () => {
-      if (document.visibilityState !== "visible" || !eventStreamReleasedRef.current) return;
-      eventStreamReleasedRef.current = false;
-      if (!sessionHookMountedRef.current || sessionIdRef.current !== sid || sessionPropIdRef.current !== sid) return;
-      maintainEventsConnected(sid);
-      void loadSession(sid, false, true).then((loadedAgentState) => {
-        if (!sessionHookMountedRef.current || sessionIdRef.current !== sid) return;
-        applyLoadedAgentState(sid, loadedAgentState);
-      });
+    let disposed = false;
+    const renew = async () => {
+      const reply = await requestLease(sid);
+      if (disposed || document.visibilityState !== "hidden") return;
+      if (sessionLeaseShowsActivity(reply)) reattachEventStreamRef.current(sid);
     };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => document.removeEventListener("visibilitychange", onVisible);
-  }, [applyLoadedAgentState, loadSession, maintainEventsConnected, session?.id]);
+    void renew();
+    const interval = setInterval(() => void renew(), SESSION_LEASE_RENEW_INTERVAL_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState !== "visible") return;
+      reattachEventStreamRef.current(sid);
+      // A frozen background page renewed nothing; coming back renews at once.
+      void renew();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      disposed = true;
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [requestLease, session?.id]);
 
   // Load session on mount
   useEffect(() => {

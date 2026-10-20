@@ -5,9 +5,11 @@ import { createJiti } from "jiti";
 
 // A page hidden for HIDDEN_PAGE_GRACE_MS lets go of the selected session's idle
 // event stream (#1283): over HTTP/1.1 every open stream holds one of the
-// browser's six connections per origin, shared by all tabs. A run, a subagent
-// left to finish or a quick tab switch keeps it; the page's return reopens it
-// and shows what the server has under way.
+// browser's six connections per origin, shared by all tabs. The page's lease
+// request, renewed every 30 s either way, says what is under way in the session:
+// a run, an extension dialog or a subagent left to finish keeps the stream, and
+// opens a released one again while the page is still hidden. The page's return
+// reopens it and shows what the server has under way.
 const shimPath = fileURLToPath(new URL("./__fixtures__/react-hook-shim.mjs", import.meta.url));
 const jiti = createJiti(import.meta.url, { tsconfigPaths: true, alias: { react: shimPath } });
 const { renderHook } = await import(shimPath);
@@ -15,7 +17,11 @@ const { useAgentSession } = await jiti.import("./useAgentSession.ts");
 const { HIDDEN_PAGE_GRACE_MS } = await jiti.import("./usePageHidden.ts");
 // useAgentSession's SESSION_LEASE_RENEW_INTERVAL_MS.
 const SESSION_LEASE_RENEW_MS = 30_000;
-const { canReleaseHiddenEventStream, HIDDEN_RELEASE_CHECK_TIMEOUT_MS } = await jiti.import("../lib/agent-event-connection.ts");
+const {
+  canReleaseHiddenEventStream,
+  SESSION_LEASE_TIMEOUT_MS,
+  sessionLeaseShowsActivity,
+} = await jiti.import("../lib/agent-event-connection.ts");
 
 const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
 globalThis.document = page;
@@ -32,10 +38,17 @@ async function setup() {
   mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
   const sources = [];
   const requests = [];
-  // What GET /api/agent/s1 and the session's state read report; tests change it.
-  // `answer` turns the idle check into one that never answers (it only ends when
-  // aborted), a network failure or an HTTP error.
-  const server = { running: true, state: { isStreaming: false, isPromptRunning: false }, subagentsActive: false, answer: "json" };
+  // What the lease reply (busy, awaitingInput, subagentsActive) and the session's
+  // state read (state) report; tests change it. `answer` turns the lease request
+  // into one that never answers (it only ends when aborted), a network failure or
+  // an HTTP error.
+  const server = {
+    busy: false,
+    awaitingInput: false,
+    subagentsActive: false,
+    state: { isStreaming: false, isPromptRunning: false },
+    answer: "json",
+  };
   globalThis.EventSource = class {
     readyState = 0;
     onmessage = null;
@@ -55,17 +68,19 @@ async function setup() {
     if (url.startsWith("/api/sessions/s1?")) {
       return json({ filePath: "/s1.jsonl", leafId: null, tree: [], treeFormat: "summary", context: { messages: [], entryIds: [], oldestEntryId: null, hasMore: false } });
     }
-    if (url === "/api/sessions/s1/state") return json({ running: server.running, state: server.state });
-    if (url.startsWith("/api/agent/s1/lease?holder=")) return json({ success: true });
-    if (url === "/api/agent/s1" && init.body) return json({ success: true, data: null });
-    if (url === "/api/agent/s1" && server.answer === "never") {
-      return new Promise((_resolve, reject) => {
-        init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
-      });
+    if (url === "/api/sessions/s1/state") return json({ running: true, state: server.state });
+    if (url.startsWith("/api/agent/s1/lease?holder=")) {
+      if (server.answer === "never") {
+        return new Promise((_resolve, reject) => {
+          init.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+        });
+      }
+      if (server.answer === "offline") throw new TypeError("Failed to fetch");
+      if (server.answer === "error") return new Response("boom", { status: 500 });
+      return json({ success: true, running: server.busy, awaitingInput: server.awaitingInput, subagentsActive: server.subagentsActive });
     }
-    if (url === "/api/agent/s1" && server.answer === "offline") throw new TypeError("Failed to fetch");
-    if (url === "/api/agent/s1" && server.answer === "error") return new Response("boom", { status: 500 });
-    if (url === "/api/agent/s1") return json(server);
+    if (url === "/api/agent/s1" && init.body) return json({ success: true, data: null });
+    if (url === "/api/agent/s1") return json({ running: true, state: server.state });
     return json({});
   };
   const ends = [];
@@ -76,10 +91,10 @@ async function setup() {
   await settle();
   hook.flush();
   const open = () => sources.filter((source) => source.readyState !== 2);
-  // GET /api/agent/s1 also reads usage on connect; count only the ones since hiding.
+  // Lease requests since hiding: the renewal tick and the release check share one.
   let mark = 0;
   const hide = () => { mark = requests.length; setVisibility("hidden"); };
-  const checks = () => requests.slice(mark).filter((url) => url === "/api/agent/s1").length;
+  const checks = () => requests.slice(mark).filter((url) => url.startsWith("/api/agent/s1/lease?holder=")).length;
   const reads = () => requests.filter((url) => url.startsWith("/api/sessions/s1?")).length;
   const tick = async (ms) => { mock.timers.tick(ms); await settle(); hook.flush(); };
   return { hook, sources, requests, server, open, checks, reads, ends, tick, hide };
@@ -159,7 +174,6 @@ test("a quick tab switch keeps the stream and reads nothing", async () => {
     assert.equal(state.sources.length, 1);
     assert.equal(state.open().length, 1);
     assert.equal(state.reads(), reads);
-    assert.equal(state.checks(), 0, "no idle check either");
   } finally {
     await teardown(state);
   }
@@ -194,7 +208,7 @@ test("a check that never answers (queued behind a full pool) releases once it ti
     await state.tick(HIDDEN_PAGE_GRACE_MS);
     assert.equal(state.checks(), 1);
     assert.equal(state.open().length, 1, "still waiting for the answer");
-    await state.tick(HIDDEN_RELEASE_CHECK_TIMEOUT_MS);
+    await state.tick(SESSION_LEASE_TIMEOUT_MS);
     assert.equal(state.open().length, 0, "no answer in time reads as a starved pool");
     assert.equal(state.checks(), 1);
   } finally {
@@ -260,7 +274,7 @@ test("the server's own run at the end of the grace keeps the stream", async () =
   try {
     await connectIdle(state);
     // A session opened in a background tab whose run the page has not seen yet.
-    state.server.state = { isStreaming: false, isPromptRunning: true };
+    state.server.busy = true;
     state.hide();
     await state.tick(HIDDEN_PAGE_GRACE_MS);
     assert.equal(state.checks(), 1);
@@ -303,20 +317,83 @@ test("a pending extension dialog keeps the stream of a hidden page", async () =>
 
     state.hide();
     await state.tick(HIDDEN_PAGE_GRACE_MS * 2);
-    assert.deepEqual(state.open(), [source]);
-    assert.equal(state.checks(), 0);
+    assert.deepEqual(state.open(), [source], "the page keeps it without asking");
   } finally {
     await teardown(state);
   }
 });
 
-test("only a reply with nothing under way and no subagent left releases", () => {
-  assert.equal(canReleaseHiddenEventStream({ running: false }), true);
-  assert.equal(canReleaseHiddenEventStream({ running: true, state: {} }), true);
-  assert.equal(canReleaseHiddenEventStream({ running: false, subagentsActive: true }), false);
-  for (const busy of ["isStreaming", "isPromptRunning", "isBashRunning", "isCompacting"]) {
-    assert.equal(canReleaseHiddenEventStream({ running: true, state: { [busy]: true } }), false, busy);
+test("a released page opens the stream again while hidden once a run starts there, and lets go after it", async () => {
+  const state = await setup();
+  try {
+    await connectIdle(state);
+    state.hide();
+    await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(state.open().length, 0);
+    await state.tick(SESSION_LEASE_RENEW_MS);
+    assert.equal(state.open().length, 0, "an idle reply keeps it closed");
+
+    // An extension timer, another tab or device starts a run in the session.
+    state.server.busy = true;
+    state.server.state = { isStreaming: true, isPromptRunning: true };
+    const reads = state.reads();
+    await state.tick(SESSION_LEASE_RENEW_MS);
+    assert.equal(state.open().length, 1, "the next renewal sees the run and opens the stream");
+    assert.equal(state.reads(), reads + 1, "and reads what the page missed");
+    assert.equal(state.hook.result.agentRunning, true);
+
+    const source = state.open()[0];
+    source.emit({ type: "connected", sessionId: "s1", isStreaming: true });
+    await settle();
+    // A prompt run ends as the wrapper reports it to every stream: the agent
+    // settles, then the prompt resolves.
+    source.emit({ type: "agent_settled" });
+    source.emit({ type: "prompt_done" });
+    await settle();
+    state.hook.flush();
+    assert.equal(state.ends.length, 1, "the completion reaches the hidden page, chime and notification included");
+
+    state.server.busy = false;
+    state.server.state = { isStreaming: false, isPromptRunning: false };
+    await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(state.open().length, 0, "let go a grace after the run settles");
+  } finally {
+    await teardown(state);
+  }
+});
+
+test("a released page opens the stream again for an extension dialog, and lets go once nothing is under way", async () => {
+  const state = await setup();
+  try {
+    await connectIdle(state);
+    state.hide();
+    await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(state.open().length, 0);
+
+    state.server.awaitingInput = true;
+    await state.tick(SESSION_LEASE_RENEW_MS);
+    assert.equal(state.open().length, 1, "the dialog is replayed through the stream");
+
+    // Answered on another device before this page saw it: nothing keeps the stream.
+    state.server.awaitingInput = false;
+    state.open()[0].emit({ type: "connected", sessionId: "s1", isStreaming: false });
+    await settle();
+    state.hook.flush();
+    await state.tick(HIDDEN_PAGE_GRACE_MS);
+    assert.equal(state.open().length, 0, "the reopen arms the grace again");
+  } finally {
+    await teardown(state);
+  }
+});
+
+test("only a lease reply with nothing under way releases; any activity reopens", () => {
+  assert.equal(canReleaseHiddenEventStream({ running: false, awaitingInput: false, subagentsActive: false }), true);
+  for (const busy of ["running", "awaitingInput", "subagentsActive"]) {
+    assert.equal(canReleaseHiddenEventStream({ [busy]: true }), false, busy);
+    assert.equal(sessionLeaseShowsActivity({ [busy]: true }), true, busy);
   }
   assert.equal(canReleaseHiddenEventStream(null), false, "an error reply keeps the stream");
   assert.equal(canReleaseHiddenEventStream("unanswered"), true, "no answer in time (a starved pool) or no network releases");
+  assert.equal(sessionLeaseShowsActivity("unanswered"), false, "and reopens nothing");
+  assert.equal(sessionLeaseShowsActivity(null), false);
 });

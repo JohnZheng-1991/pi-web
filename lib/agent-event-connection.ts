@@ -222,36 +222,37 @@ export class AgentEventConnection {
   }
 }
 
-/** What `GET /api/agent/[id]` answers, as far as a hidden page's release reads it. */
-export interface AgentIdleCheckReply {
+/** What `POST /api/agent/[id]/lease` answers besides keeping the session alive. */
+export interface SessionLeaseReply {
   running?: boolean;
+  awaitingInput?: boolean;
   subagentsActive?: boolean;
-  state?: {
-    isStreaming?: boolean;
-    isPromptRunning?: boolean;
-    isBashRunning?: boolean;
-    isCompacting?: boolean;
-  };
 }
 
 /**
- * How long a hidden page waits for that check. Over HTTP/1.1 a check queued behind six open
+ * How long a page waits for a lease reply. Over HTTP/1.1 a request queued behind six open
  * streams never leaves the browser, so no answer in time reads as a starved pool.
  */
-export const HIDDEN_RELEASE_CHECK_TIMEOUT_MS = 5_000;
+export const SESSION_LEASE_TIMEOUT_MS = 5_000;
 
 /**
- * Whether a page hidden past its grace may close the selected session's stream (#1283): only
- * when the server reports nothing under way there (a run or command another tab started, a
- * `!` command, a compaction) and no subagent of the session left to finish, since a subagent's
- * end starts a turn in it. `"unanswered"` (no reply within HIDDEN_RELEASE_CHECK_TIMEOUT_MS, or
- * no network) releases: the pool is starved, which is what the release is for, or the stream is
- * down anyway. `null` (the server answered with an error) keeps the stream until the next check.
+ * Whether the server reports anything under way in the session: a run, a queued prompt, a `!`
+ * command, a compaction, an extension dialog waiting for an answer, or a subagent left to finish
+ * (its end starts a turn there). A hidden page keeps or reopens the session's stream while it does.
  */
-export function canReleaseHiddenEventStream(reply: AgentIdleCheckReply | "unanswered" | null | undefined): boolean {
+export function sessionLeaseShowsActivity(reply: SessionLeaseReply | "unanswered" | null | undefined): boolean {
+  if (!reply || reply === "unanswered") return false;
+  return Boolean(reply.running || reply.awaitingInput || reply.subagentsActive);
+}
+
+/**
+ * Whether a page hidden past its grace may close the selected session's stream (#1283): only when
+ * the lease reply shows nothing under way. `"unanswered"` (no reply within SESSION_LEASE_TIMEOUT_MS,
+ * or no network) releases: the pool is starved, which is what the release is for, or the stream
+ * is down anyway. `null` (the server answered with an error) keeps the stream until the next check.
+ */
+export function canReleaseHiddenEventStream(reply: SessionLeaseReply | "unanswered" | null | undefined): boolean {
   if (reply === "unanswered") return true;
-  if (!reply || reply.subagentsActive) return false;
-  const state = reply.state;
-  return !(reply.running && state
-    && (state.isStreaming || state.isPromptRunning || state.isBashRunning || state.isCompacting));
+  if (!reply) return false;
+  return !sessionLeaseShowsActivity(reply);
 }
