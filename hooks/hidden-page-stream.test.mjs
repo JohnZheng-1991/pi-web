@@ -13,6 +13,8 @@ const jiti = createJiti(import.meta.url, { tsconfigPaths: true, alias: { react: 
 const { renderHook } = await import(shimPath);
 const { useAgentSession } = await jiti.import("./useAgentSession.ts");
 const { HIDDEN_PAGE_GRACE_MS } = await jiti.import("./usePageHidden.ts");
+// useAgentSession's SESSION_LEASE_RENEW_INTERVAL_MS.
+const SESSION_LEASE_RENEW_MS = 30_000;
 const { canReleaseHiddenEventStream, HIDDEN_RELEASE_CHECK_TIMEOUT_MS } = await jiti.import("../lib/agent-event-connection.ts");
 
 const page = Object.assign(new EventTarget(), { visibilityState: "visible" });
@@ -54,7 +56,7 @@ async function setup() {
       return json({ filePath: "/s1.jsonl", leafId: null, tree: [], treeFormat: "summary", context: { messages: [], entryIds: [], oldestEntryId: null, hasMore: false } });
     }
     if (url === "/api/sessions/s1/state") return json({ running: server.running, state: server.state });
-    if (url === "/api/agent/s1/lease") return json({ success: true, renewed: 1 });
+    if (url.startsWith("/api/agent/s1/lease?holder=")) return json({ success: true });
     if (url === "/api/agent/s1" && init.body) return json({ success: true, data: null });
     if (url === "/api/agent/s1" && server.answer === "never") {
       return new Promise((_resolve, reject) => {
@@ -120,27 +122,26 @@ test("a page hidden past the grace closes the idle stream and its return reopens
   }
 });
 
-test("a released page holds the session's lease itself until it returns", async () => {
+test("the page holds the session's lease the whole time, with or without its stream", async () => {
   const state = await setup();
   try {
-    await connectIdle(state);
     const holds = () => state.requests.filter((url) => /^\/api\/agent\/s1\/lease\?holder=[\w-]+$/.test(url)).length;
-    const renewals = () => state.requests.filter((url) => url === "/api/agent/s1/lease").length;
+    assert.equal(holds(), 1, "taken as soon as the session is selected");
+    await connectIdle(state);
+    await state.tick(SESSION_LEASE_RENEW_MS);
+    assert.equal(holds(), 2);
+
     state.hide();
     await state.tick(HIDDEN_PAGE_GRACE_MS);
     assert.equal(state.open().length, 0);
-    assert.equal(holds(), 1, "the stream's lease ended with it: one of the page's own replaces it at once");
-    const renewed = renewals();
-    for (let index = 0; index < 4; index++) await state.tick(HIDDEN_PAGE_GRACE_MS);
-    assert.ok(holds() >= 4, "renewed while the page stays away, so the idle wrapper is not reaped");
-    assert.equal(renewals(), renewed);
+    const atRelease = holds();
+    for (let index = 0; index < 4; index++) await state.tick(SESSION_LEASE_RENEW_MS);
+    assert.equal(holds(), atRelease + 4, "renewed while the page stays away, so the idle wrapper is not reaped");
 
     setVisibility("visible");
     await settle();
-    const held = holds();
-    for (let index = 0; index < 2; index++) await state.tick(HIDDEN_PAGE_GRACE_MS);
-    assert.equal(holds(), held, "back with a stream, the stream's lease is renewed again");
-    assert.ok(renewals() > renewed);
+    assert.equal(holds(), atRelease + 5, "coming back renews at once");
+    assert.equal(state.open().length, 1);
   } finally {
     await teardown(state);
   }

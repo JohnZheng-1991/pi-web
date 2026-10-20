@@ -31,6 +31,7 @@ type Connection = {
   sessionId: string;
   source: AgentEventSourceLike;
   attempt: Attempt;
+  watchdog: ReturnType<typeof setInterval> | null;
 };
 
 export interface AgentEventConnectionOptions {
@@ -39,6 +40,11 @@ export interface AgentEventConnectionOptions {
   shouldMaintain(sessionId: string): boolean;
   readinessTimeoutMs: number;
   reconnectDelayMs: number;
+  /**
+   * A ready stream that delivers nothing for this long, heartbeats included
+   * (AGENT_EVENT_HEARTBEAT_MS), is dead and reconnects. Omitted: never.
+   */
+  staleAfterMs?: number;
   onUnexpectedError?(error: unknown): void;
 }
 
@@ -134,11 +140,13 @@ export class AgentEventConnection {
         reject(error);
       },
     };
-    const connection: Connection = { sessionId, source, attempt };
+    const connection: Connection = { sessionId, source, attempt, watchdog: null };
     this.current = connection;
+    let lastSeen = Date.now();
 
     source.onmessage = (message) => {
       if (this.current !== connection) return;
+      lastSeen = Date.now();
       let event: AgentEventLike;
       try {
         event = JSON.parse(message.data) as AgentEventLike;
@@ -146,10 +154,21 @@ export class AgentEventConnection {
         return;
       }
 
+      if (event.type === "heartbeat") return;
       if (event.type === "connected") {
         attempt.ready = true;
         attempt.succeed();
         this.stopRetrying();
+        const staleAfterMs = this.options.staleAfterMs;
+        if (staleAfterMs && connection.watchdog === null) {
+          // Checked against the clock, so a background tab's throttled timer
+          // only reconnects later, never wrongly.
+          connection.watchdog = setInterval(() => {
+            if (Date.now() - lastSeen > staleAfterMs) {
+              this.fail(connection, new AgentEventConnectionError("closed"));
+            }
+          }, Math.max(1_000, Math.floor(staleAfterMs / 3)));
+        }
       } else if (event.type === "startup_error") {
         const message = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
         this.fail(connection, new AgentEventConnectionError("startup_error", message));
@@ -172,6 +191,8 @@ export class AgentEventConnection {
   }
 
   private discard(connection: Connection, error: AgentEventConnectionError): void {
+    if (connection.watchdog !== null) clearInterval(connection.watchdog);
+    connection.watchdog = null;
     connection.attempt.fail(error);
     connection.source.close();
     if (this.current === connection) this.current = null;

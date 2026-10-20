@@ -35,7 +35,7 @@ import {
   type AgentIdleCheckReply,
 } from "@/lib/agent-event-connection";
 import { HIDDEN_PAGE_GRACE_MS } from "@/hooks/usePageHidden";
-import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
+import { AGENT_EVENT_HEARTBEAT_MS, isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
 import { CODEMODE_TOOL_NAME, getCodemodeProgress } from "@/lib/codemode-view";
 import { updateExtensionWidgets } from "@/lib/extension-widgets";
@@ -241,13 +241,13 @@ const BASH_STATE_RECONCILE_MS = 1_000;
 const EVENT_STREAM_READY_TIMEOUT_MS = 60_000;
 const EVENT_STREAM_RECONNECT_DELAY_MS = 1_000;
 const SESSION_LEASE_RENEW_INTERVAL_MS = 30_000;
-// This page's id for the lease it holds in place of a released stream's (holdSessionLivenessLease()).
+// A ready stream silent for two and a half heartbeats is dead (AgentEventConnection reconnects).
+const EVENT_STREAM_STALE_MS = AGENT_EVENT_HEARTBEAT_MS * 2.5;
+// This page's id for the lease that keeps its selected session alive (holdSessionLivenessLease()).
 let pageLeaseHolder: string | null = null;
-function sessionLeaseUrl(sid: string, hold: boolean): string {
-  const url = `/api/agent/${encodeURIComponent(sid)}/lease`;
-  if (!hold) return url;
+function sessionLeaseUrl(sid: string): string {
   pageLeaseHolder ??= `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  return `${url}?holder=${pageLeaseHolder}`;
+  return `/api/agent/${encodeURIComponent(sid)}/lease?holder=${pageLeaseHolder}`;
 }
 // Retry temporary model-list failures without requiring a page refresh.
 const MODELS_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
@@ -429,11 +429,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const eventStreamGraceGenerationRef = useRef(0);
   const eventStreamGraceActiveRef = useRef(false);
   // True while a hidden page has let go of the selected session's idle stream
-  // (HTTP/1.1 allows a browser six connections per origin, shared by its tabs);
-  // the count moves on with every release, so a lease renewal that straddles
-  // one says nothing about the stream open now.
+  // (HTTP/1.1 allows a browser six connections per origin, shared by its tabs).
   const eventStreamReleasedRef = useRef(false);
-  const eventStreamReleaseCountRef = useRef(0);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
   const sessionPropIdRef = useRef<string | null>(session?.id ?? null);
   // False while the session carries no tool selection of its own, so its loadout
@@ -511,6 +508,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ),
       readinessTimeoutMs: EVENT_STREAM_READY_TIMEOUT_MS,
       reconnectDelayMs: EVENT_STREAM_RECONNECT_DELAY_MS,
+      staleAfterMs: EVENT_STREAM_STALE_MS,
       onUnexpectedError: (error) => {
         console.error("Failed to maintain the agent event stream:", error);
       },
@@ -1062,8 +1060,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     eventConnectionRef.current!.maintain(sid);
   }, []);
 
-  // Keep the selected session warm even while its agent is idle. The SSE lease
-  // is renewed separately below and expires if the browser disappears.
+  // Keep the selected session's stream open even while its agent is idle. The
+  // session itself stays alive on the page's lease (below), which expires if
+  // the browser disappears.
   useEffect(() => {
     const sid = session?.id;
     if (!sid) return;
@@ -1080,55 +1079,34 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [maintainEventsConnected, session?.id]);
 
+  // The page keeps its selected session alive with a lease of its own
+  // (holdSessionLivenessLease()), renewed whether or not it holds the event
+  // stream: a hidden page lets go of the stream (#1283), not of the session, so
+  // the idle wrapper and an extension's timer in it live on. A dead stream is
+  // the connection's heartbeat watchdog's to notice (staleAfterMs).
   useEffect(() => {
     const sid = session?.id;
     if (!sid) return;
-    let disposed = false;
     let renewing = false;
-
-    const renewLease = async () => {
-      if (disposed || renewing) return;
+    const renewLease = () => {
+      if (renewing) return;
       renewing = true;
-      // A released stream took its lease along; the page holds one of its own instead, so the
-      // idle wrapper (and an extension's timer in it) lives on as long as with the stream.
-      const held = eventStreamReleasedRef.current;
-      const releaseCount = eventStreamReleaseCountRef.current;
-      try {
-        const response = await fetch(sessionLeaseUrl(sid, held), {
-          method: "POST",
-          cache: "no-store",
-        });
-        if (!response.ok || disposed || held) return;
-        const result = await response.json() as { renewed?: number };
-        if (
-          !disposed
-          && result.renewed === 0
-          && releaseCount === eventStreamReleaseCountRef.current
-          && sessionIdRef.current === sid
-          && sessionPropIdRef.current === sid
-        ) {
-          closeEvents();
-          maintainEventsConnected(sid);
-        }
-      } catch {
-        // Retry on the next interval; the SSE connection remains the primary path.
-      } finally {
-        renewing = false;
-      }
+      void fetch(sessionLeaseUrl(sid), { method: "POST", cache: "no-store" })
+        .catch(() => { /* renewed on the next tick, well inside the lease's TTL */ })
+        .finally(() => { renewing = false; });
     };
-
-    const interval = setInterval(() => void renewLease(), SESSION_LEASE_RENEW_INTERVAL_MS);
+    renewLease();
+    const interval = setInterval(renewLease, SESSION_LEASE_RENEW_INTERVAL_MS);
+    // A frozen background page renews nothing; coming back renews at once.
     const onVisible = () => {
-      // A released stream is reopened by the return path (below), with its own lease.
-      if (document.visibilityState === "visible" && !eventStreamReleasedRef.current) void renewLease();
+      if (document.visibilityState === "visible") renewLease();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      disposed = true;
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [closeEvents, maintainEventsConnected, session?.id]);
+  }, [session?.id]);
 
   // A page hidden for HIDDEN_PAGE_GRACE_MS lets go of the selected session's
   // stream while nothing needs it (#1283): each one holds a browser connection,
@@ -1178,9 +1156,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return;
       }
       eventStreamReleasedRef.current = true;
-      eventStreamReleaseCountRef.current += 1;
       closeEvents();
-      void fetch(sessionLeaseUrl(sid, true), { method: "POST", cache: "no-store" }).catch(() => {});
     };
     const arm = () => {
       timer ??= setTimeout(() => void check(), HIDDEN_PAGE_GRACE_MS);
