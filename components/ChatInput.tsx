@@ -646,7 +646,8 @@ function ModelNoticeBanner({ tone, title, body, onClose }: { tone: "error" | "wa
 export function ModelErrorBanner({ error }: { error?: string | null }) {
   const { t } = useI18n();
   if (!error) return null;
-  return <ModelNoticeBanner tone="error" title={t("chat.modelError")} body={error} />;
+  const directoryError = error.startsWith("Directory does not exist:");
+  return <ModelNoticeBanner tone="error" title={t(directoryError ? "chat.directoryError" : "chat.modelError")} body={error} />;
 }
 
 /** True when the selected model is known to accept image input (#584). Unknown modality info never blocks the user. */

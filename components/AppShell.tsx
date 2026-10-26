@@ -30,6 +30,7 @@ import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
+import { downloadBinaryFile } from "@/lib/file-download-client";
 import { getTurnDiffUrl, type TurnDiffRef } from "@/lib/turn-diff";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { buildLineCommentsMessage } from "@/lib/line-comments";
@@ -1265,7 +1266,9 @@ export function AppShell() {
   }, [isMobile]);
 
   const handleOpenLinkedFile = useCallback((filePath: string, page?: number) => {
-    handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
+    void downloadBinaryFile(filePath).then((downloaded) => {
+      if (!downloaded) handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
+    }).catch(() => handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page }));
   }, [handleOpenFile, selectedSession?.id]);
 
   /** A turn's written file, opened on that turn's own diff (never the working tree's). */

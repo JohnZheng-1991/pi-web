@@ -285,19 +285,32 @@ test("every saved row's title links to its session, encoded, in every context an
   assert.doesNotMatch(rowMarkup(render({ rows: [sessionRow(session("d"))], confirmDeleteRootId: "d" }), "session:group:d"), /<a /);
 });
 
-test("pinned rows name their project and archived rows offer restore with the archive time", () => {
+test("pinned rows name their project and archived rows offer restore with their latest activity", () => {
   const pinned = rowMarkup(render({ rows: [sessionRow(session("pin"), { context: "pinned" })] }), "session:pinned:pin");
   assert.match(pinned, /<span class="session-tree-meta"><span class="session-tree-project">app<\/span><\/span>/);
   assert.match(pinned, /aria-label="Archive"/);
 
+  // #1351: archived two hours ago, last active five minutes ago: the row says
+  // the activity, as a live row does, and not the archive time.
   const archived = rowMarkup(render({
     rows: [sessionRow(session("old"), { context: "archive", archivedAt: NOW - 2 * 60 * MINUTE })],
   }), "session:archive:old");
   assert.match(archived, /class="session-tree-row session-tree-session is-archived"/);
   assert.doesNotMatch(archived, /session-tree-slot/);
-  assert.match(archived, /<span class="session-tree-meta">2h<\/span>/);
+  assert.match(archived, /<span class="session-tree-meta">5m<\/span>/);
+  assert.doesNotMatch(archived, /session-tree-meta">2h</);
   assert.match(archived, /aria-label="Restore" title="Restore"/);
   assert.doesNotMatch(archived, /aria-label="Archive"/);
+  // The tooltip says the same thing, so the two never disagree.
+  assert.match(archived, /title="first old\n3 msgs · 5 minutes ago"/);
+});
+
+test("an archived row still carries its archive time for the menu", () => {
+  const archivedAt = NOW - 2 * 60 * MINUTE;
+  const row = sessionRow(session("old"), { context: "archive", archivedAt });
+  assert.equal(row.archivedAt, archivedAt);
+  // The row model keeps the time even though the label no longer shows it.
+  assert.match(rowMarkup(render({ rows: [row] }), "session:archive:old"), /aria-label="Restore"/);
 });
 
 test("the phone layout uses tall rows, keeps ⋯ and drops the archive quick button", () => {

@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createJiti } from "jiti";
 
-const jiti = createJiti(import.meta.url, { tsconfigPaths: true });
+const jiti = createJiti(import.meta.url, {
+  jsx: { runtime: "automatic" },
+  tsconfigPaths: true,
+});
 const {
+  filterSidebarProviders,
   collectModelRenames,
   deleteProviderEntry,
   hasModelCostDraftValue,
@@ -11,6 +15,7 @@ const {
   parseCompleteModelCost,
   providerMatchesSearch,
   renameProviderEntry,
+  sidebarFilterEscapeClears,
   savedModelIds,
   serializeHeaderRows,
   setCompatBool,
@@ -18,6 +23,9 @@ const {
   trackAddedModels,
   updateHeaderRow,
 } = await jiti.import("./models-config-helpers.ts");
+const React = await jiti.import("react");
+const { renderToStaticMarkup } = await jiti.import("react-dom/server");
+const { ProviderFilterInput } = await jiti.import("./ModelsConfig.tsx");
 
 test("disabling the developer role writes an explicit false override", () => {
   assert.deepEqual(
@@ -235,6 +243,76 @@ test("a new provider taking a renamed or deleted provider's old id stays untrack
   const readded = { providers: { ...afterDeletingSaved.providers, stepfun: {} } };
   renameProviderEntry(readded, state, "stepfun", "later");
   assert.deepEqual([...state.renames], []);
+});
+
+const oauthRow = (id, name) => ({ id, name, usesCallbackServer: false, loggedIn: true });
+const customRow = (id, name, models = []) => ({ id, name, models });
+const byId = (row) => row.id;
+const byName = (row) => row.name;
+
+const filterIds = (search, rows) =>
+  filterSidebarProviders(search, rows, byId, byName).map((row) => row.id);
+
+test("the sidebar filter keeps matching providers in their incoming order", () => {
+  const rows = [
+    oauthRow("anthropic", "Anthropic"),
+    oauthRow("openai-codex", "ChatGPT Plus/Pro"),
+    oauthRow("kimi-coding", "Kimi"),
+  ];
+  // Displayed name, mixed case and surrounding whitespace all match.
+  assert.deepEqual(filterIds(" chATGPT ", rows), ["openai-codex"]);
+  assert.deepEqual(filterIds("kimi", rows), ["kimi-coding"]);
+  assert.deepEqual(filterIds("anthropic", rows), ["anthropic"]);
+  // A blank query is no filter at all.
+  assert.deepEqual(filterIds("   ", rows), ["anthropic", "openai-codex", "kimi-coding"]);
+  assert.deepEqual(filterIds("missing", rows), []);
+});
+
+test("a custom provider matches by its local name as well as its id", () => {
+  const rows = [
+    customRow("house", "House Gateway", [{ id: "a" }, { id: "b" }]),
+    customRow("other", "Other", []),
+  ];
+  assert.deepEqual(filterIds("house", rows), ["house"]);
+  assert.deepEqual(filterIds("gateway", rows), ["house"]);
+  assert.deepEqual(filterIds("other", rows), ["other"]);
+  // A matching provider keeps its model children, and only its own.
+  assert.deepEqual(filterSidebarProviders("gateway", rows, byId, byName)[0].models, [{ id: "a" }, { id: "b" }]);
+  assert.deepEqual(filterIds("models", rows), []);
+});
+
+test("a custom provider without a local name is matched by its id", () => {
+  const rows = [{ id: "bare" }, customRow("named", "Named One")];
+  assert.deepEqual(filterIds("bare", rows), ["bare"]);
+  assert.deepEqual(filterIds("named", rows), ["named"]);
+  assert.deepEqual(filterIds("Named One", rows), ["named"]);
+});
+
+test("the sidebar filter matches a Chinese provider name", () => {
+  const rows = [customRow("moonshot", "月之暗面"), customRow("other", "Other")];
+  assert.deepEqual(filterIds("月之", rows), ["moonshot"]);
+  assert.deepEqual(filterIds("暗面", rows), ["moonshot"]);
+});
+
+test("the sidebar filter names itself and offers a clear control only when it has a query", () => {
+  const props = { value: "", onChange() {}, onClear() {}, placeholder: "Filter configured providers…", clearLabel: "Clear filter" };
+  const empty = renderToStaticMarkup(React.createElement(ProviderFilterInput, props));
+  assert.match(empty, /placeholder="Filter configured providers…"/);
+  assert.match(empty, /aria-label="Filter configured providers…"/);
+  assert.doesNotMatch(empty, /Clear filter/);
+
+  const filled = renderToStaticMarkup(React.createElement(ProviderFilterInput, { ...props, value: "ant" }));
+  assert.match(filled, /value="ant"/);
+  assert.match(filled, /aria-label="Clear filter"/);
+});
+
+test("Escape clears a nonempty sidebar filter and is left to the dialog otherwise", () => {
+  assert.equal(sidebarFilterEscapeClears("ant", "Escape", false), true);
+  // An IME composition ends with Escape too: it must not throw the query away.
+  assert.equal(sidebarFilterEscapeClears("ant", "Escape", true), false);
+  // Other keys and an empty filter pass through.
+  assert.equal(sidebarFilterEscapeClears("ant", "a", false), false);
+  assert.equal(sidebarFilterEscapeClears("", "Escape", false), false);
 });
 
 test("Add provider's search matches a provider by id or name", () => {

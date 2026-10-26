@@ -222,3 +222,30 @@ export function providerMatchesSearch(search: string, id: string, label: string)
   const query = search.trim().toLowerCase();
   return !query || label.toLowerCase().includes(query) || id.toLowerCase().includes(query);
 }
+
+/**
+ * Settings > Models' sidebar filter over already-listed providers. Rows keep
+ * their incoming order; a row without a shown name falls back to its id. The
+ * filter is local only: it never changes what a save writes.
+ */
+export function filterSidebarProviders<T>(
+  search: string,
+  rows: readonly T[],
+  getId: (row: T) => string,
+  getLabel: (row: T) => string | undefined,
+): T[] {
+  if (!search.trim()) return [...rows];
+  return rows.filter((row) => {
+    const id = getId(row);
+    return providerMatchesSearch(search, id, getLabel(row) || id);
+  });
+}
+
+/**
+ * Whether Escape inside the sidebar filter clears it. An IME composition also
+ * ends on Escape, so composing must leave the query alone; a nonempty query
+ * that is cleared keeps the key from reaching the dialog and closing it.
+ */
+export function sidebarFilterEscapeClears(value: string, key: string, isComposing: boolean): boolean {
+  return key === "Escape" && !isComposing && value !== "";
+}

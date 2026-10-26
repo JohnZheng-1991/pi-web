@@ -599,6 +599,7 @@ export const zhCNLocale: LocalePlugin = {
     "chat.followUpHint": "在 Agent 完成后排队此消息",
     "chat.inputHistory": "输入历史",
     "chat.modelError": "模型错误",
+    "chat.directoryError": "工作目录错误",
     "chat.modelScopeWarning": "模型范围警告",
     "chat.modelScopeWarnings": "模型范围警告",
     "chat.send": "发送",

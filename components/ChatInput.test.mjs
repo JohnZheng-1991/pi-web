@@ -332,6 +332,12 @@ test("does not render an empty model error", () => {
   );
 });
 
+test("a missing working directory is not presented as a model error", () => {
+  const render = (error) => renderToStaticMarkup(React.createElement(I18nProvider, null, React.createElement(ModelErrorBanner, { error })));
+  assert.match(render("Directory does not exist: /project/moved"), />Working directory error</);
+  assert.match(render("Provider failed"), />Model error</);
+});
+
 test("renders enabledModels scope warnings", () => {
   const html = renderToStaticMarkup(
     React.createElement(

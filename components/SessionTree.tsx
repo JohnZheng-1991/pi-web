@@ -576,12 +576,14 @@ const SessionRowView = memo(function SessionRowView({
   // the suffix that tells it from its source, never the suffix.
   const forkTitle = root.name && root.relation?.kind === "fork" ? splitForkSuffix(root.name) : null;
   const details = root.detailsPending ? "…" : t("sidebar.messagesCount", { count: root.messageCount });
-  const tooltip = `${title}\n${details} · ${formatRelativeTime(root.modified, locale, nowDate)}${branch ? ` · ⑂ ${branch}` : ""}`;
+  // An archived row's time is the family's last activity, as a live row's is
+  // (#1351): a session finished a month ago and archived today is not "now".
+  // `archivedAt` stays on the row and in its menu; only this label changed.
+  const tooltip = `${title}\n${details} · ${formatRelativeTime(context === "archive" ? family.latestModified : root.modified, locale, nowDate)}${branch ? ` · ⑂ ${branch}` : ""}`;
 
   // The right column says the one thing worth knowing: awaiting input, else
-  // running, else unread, else when (a pinned row names its project instead, an
-  // archived row says when it was archived). Nothing sits before the title, so it
-  // gets the room.
+  // running, else unread, else when (a pinned row names its project instead).
+  // Nothing sits before the title, so it gets the room.
   let meta: ReactNode;
   let metaState = "";
   let metaTitle: string | undefined;
@@ -602,8 +604,6 @@ const SessionRowView = memo(function SessionRowView({
     metaTitle = t("sidebar.newActivity");
   } else if (context === "pinned") {
     meta = <span className="session-tree-project">{row.project.name}</span>;
-  } else if (context === "archive" && row.archivedAt !== null) {
-    meta = formatShortRelativeTime(new Date(row.archivedAt), locale, nowDate);
   } else {
     meta = formatShortRelativeTime(family.latestModified, locale, nowDate);
   }

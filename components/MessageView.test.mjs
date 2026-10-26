@@ -1021,3 +1021,15 @@ test("one column names a deleted file's section by its old path", () => {
   assert.ok(html.includes(">a/gone.ts<"));
   assert.ok(!html.includes("/dev/null"));
 });
+
+test("prints a message timestamp in the interface language's regional format (#1372)", async () => {
+  const { formatUpdatedTime } = await jiti.import("@/lib/i18n/format");
+  const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The provider's default locale, not the runtime's own default: a 24-hour
+  // profile used to get AM/PM times because `toLocaleTimeString` got no locale.
+  const now = Date.now();
+  const html = renderMessage({ role: "user", content: "hi", timestamp: now });
+  assert.match(html, new RegExp(`>${escape(formatUpdatedTime(now, "en"))}<`));
+  const earlier = renderMessage({ role: "user", content: "hi", timestamp: now - 3 * 86_400_000 });
+  assert.match(earlier, new RegExp(`>${escape(new Date(now - 3 * 86_400_000).toLocaleDateString("en", { month: "short", day: "numeric" }))} .*<`));
+});

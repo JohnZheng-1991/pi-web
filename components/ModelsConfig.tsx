@@ -15,6 +15,8 @@ import {
   modelCostToDraft,
   parseCompleteModelCost,
   providerMatchesSearch,
+  filterSidebarProviders,
+  sidebarFilterEscapeClears,
   savedModelIds,
   serializeHeaderRows,
   setCompatBool,
@@ -108,6 +110,8 @@ interface ModelEntry {
 }
 
 interface ProviderEntry {
+  /** Display name; the sidebar filter matches it as well as the id. */
+  name?: string;
   baseUrl?: string;
   api?: string;
   apiKey?: string;
@@ -1716,6 +1720,68 @@ function ApiKeyDetail({ provider, onRefresh, enabledModels, contextSettings }: {
   );
 }
 
+// ── Sidebar provider filter ───────────────────────────────────────────────
+
+interface ProviderFilterInputProps {
+  value: string;
+  onChange: (value: string) => void;
+  onClear: () => void;
+  placeholder: string;
+  clearLabel: string;
+}
+
+/**
+ * The Models sidebar's local filter over configured providers. It only narrows
+ * what the sidebar shows — the draft, the selection and its unsaved edits stay
+ * as they are, so a hidden provider is never treated as deleted.
+ */
+export function ProviderFilterInput({ value, onChange, onClear, placeholder, clearLabel }: ProviderFilterInputProps) {
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "center", gap: 6, flexShrink: 0,
+        padding: "6px 10px", borderBottom: "1px solid var(--border)",
+      }}
+    >
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: "var(--text-dim)", flexShrink: 0 }}>
+        <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+      </svg>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        // Escape clears the query without closing Settings; an IME composition
+        // ends on Escape too, so composing leaves the query alone.
+        onKeyDown={(e) => {
+          if (!sidebarFilterEscapeClears(value, e.key, e.nativeEvent?.isComposing === true)) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onClear();
+        }}
+        placeholder={placeholder}
+        aria-label={placeholder}
+        style={{
+          flex: 1, minWidth: 0, background: "none", border: "none", outline: "none",
+          color: "var(--text)", fontFamily: "inherit", fontSize: 12, boxSizing: "border-box",
+        }}
+      />
+      {value !== "" && (
+        <button
+          type="button"
+          onClick={onClear}
+          aria-label={clearLabel}
+          title={clearLabel}
+          style={{
+            flexShrink: 0, padding: 0, background: "none", border: "none",
+            color: "var(--text-dim)", cursor: "pointer", fontSize: 14, lineHeight: 1,
+          }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Add provider picker ───────────────────────────────────────────────────────
 
 interface AddProviderPickerProps {
@@ -1894,6 +1960,11 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
    * applies it like every other visible edit; Rename applies it right away.
    */
   const [providerNameDraft, setProviderNameDraft] = useState<{ provider: string; name: string } | null>(null);
+  /**
+   * Narrows the sidebar only. Never saved, never sent: clearing it brings every
+   * provider back, and a filtered-out selection keeps its editor and draft.
+   */
+  const [providerFilter, setProviderFilter] = useState("");
 
   const refreshAuthProviders = useCallback(() => {
     fetch("/api/auth/providers")
@@ -1965,6 +2036,8 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
     let n = 1;
     while (config.providers?.[finalName]) finalName = `new-provider-${n++}`;
     setConfig((prev) => ({ ...prev, providers: { ...(prev.providers ?? {}), [finalName]: { api: "openai-completions" } } }));
+    // It just selected a provider: reveal the new row instead of filtering it away.
+    setProviderFilter("");
     setSelection({ type: "provider", name: finalName });
   }, [config.providers]);
 
@@ -1994,8 +2067,12 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
   }, []);
 
   const renameProvider = useCallback((oldName: string, newName: string) => {
-    if (applyProviderRename(config, oldName, newName)) setSaveError(null);
-    else setSaveError(t("models.providerNameTaken", { name: newName }));
+    if (applyProviderRename(config, oldName, newName)) {
+      // The rename selected the provider under its new id: show it even while
+      // the old query would filter it out.
+      setProviderFilter("");
+      setSaveError(null);
+    } else setSaveError(t("models.providerNameTaken", { name: newName }));
   }, [applyProviderRename, config, t]);
 
   const deleteProvider = useCallback((name: string) => {
@@ -2007,6 +2084,9 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
     const remaining = Object.keys(next.providers ?? {});
     setProviderNameDraft((prev) => prev?.provider === name ? null : prev);
     setConfig(next);
+    // The delete selected another provider: reveal it instead of leaving the
+    // list filtered to a provider that no longer exists.
+    setProviderFilter("");
     setSelection(remaining.length > 0 ? { type: "provider", name: remaining[0] } : null);
   }, [config]);
 
@@ -2125,6 +2205,15 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
   const activeOAuth = oauthProviders.filter((p) => p.loggedIn);
   const activeApiKey = apiKeyProviders.filter((p) => p.configured);
 
+  // The filter only narrows what the sidebar shows: `providers`, the draft and
+  // the selection stay whole, so a hidden provider is never read as deleted.
+  const shownOAuth = filterSidebarProviders(providerFilter, activeOAuth, (p) => p.id, (p) => p.name);
+  const shownApiKey = filterSidebarProviders(providerFilter, activeApiKey, (p) => p.id, (p) => p.displayName);
+  const shownProviders = filterSidebarProviders(providerFilter, providers, ([id]) => id, ([, entry]) => entry.name);
+  const filteredCount = shownOAuth.length + shownApiKey.length + shownProviders.length;
+  /** A pending list is not a definitive no-match result yet. */
+  const filterPending = loading || !authListed;
+
   // Resolve current detail
   const detailContent = (() => {
     if (!selection) return null;
@@ -2183,9 +2272,18 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
 
           {/* Left: tree */}
           <ConfigSidebar>
+            {!loading && (activeOAuth.length + activeApiKey.length + providers.length) > 0 && (
+              <ProviderFilterInput
+                value={providerFilter}
+                onChange={setProviderFilter}
+                onClear={() => setProviderFilter("")}
+                placeholder={t("i18n.searchProviders")}
+                clearLabel={t("sidebar.clearSearch")}
+              />
+            )}
             <ConfigSidebarList>
               {/* Active OAuth subscriptions */}
-              {activeOAuth.map((p) => {
+              {shownOAuth.map((p) => {
                 const isSelected = selection?.type === "oauth" && selection.providerId === p.id;
                 return (
                   <ConfigSidebarItem
@@ -2201,7 +2299,7 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
               })}
 
               {/* Active API key providers */}
-              {activeApiKey.map((p) => {
+              {shownApiKey.map((p) => {
                 const isSelected = selection?.type === "apikey" && selection.providerId === p.id;
                 return (
                   <ConfigSidebarItem
@@ -2217,14 +2315,14 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
               })}
 
               {/* Divider before custom providers, only when there are active managed providers */}
-              {(activeOAuth.length > 0 || activeApiKey.length > 0) && providers.length > 0 && (
+              {(shownOAuth.length > 0 || shownApiKey.length > 0) && shownProviders.length > 0 && (
                 <div style={{ margin: "4px 8px", borderTop: "1px solid var(--border)" }} />
               )}
 
               {/* Custom providers */}
               {loading ? (
                  <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-muted)" }}>{t("i18n.loading")}</div>
-              ) : providers.map(([pName, pData]) => {
+              ) : shownProviders.map(([pName, pData]) => {
                 const isProviderSelected = selection?.type === "provider" && selection.name === pName;
                 const models = pData.models ?? [];
                 return (
@@ -2277,6 +2375,10 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
                   </div>
                 );
               })}
+
+              {providerFilter.trim() !== "" && filteredCount === 0 && !filterPending && (
+                <div style={{ padding: "10px 8px", fontSize: 12, color: "var(--text-dim)" }}>{t("i18n.noProviders")}</div>
+              )}
             </ConfigSidebarList>
 
             {/* Add provider */}
@@ -2320,8 +2422,8 @@ export function ModelsConfig({ onClose, embedded = false, cwd = null }: {
       <AddProviderPicker
         oauthProviders={oauthProviders}
         apiKeyProviders={apiKeyProviders}
-        onSelectOAuth={(id) => setSelection({ type: "oauth", providerId: id })}
-        onSelectApiKey={(id) => setSelection({ type: "apikey", providerId: id })}
+        onSelectOAuth={(id) => { setProviderFilter(""); setSelection({ type: "oauth", providerId: id }); }}
+        onSelectApiKey={(id) => { setProviderFilter(""); setSelection({ type: "apikey", providerId: id }); }}
         onAddCustom={addCustomProvider}
         onClose={() => setPickerOpen(false)}
       />

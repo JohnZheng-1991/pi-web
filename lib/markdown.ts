@@ -600,16 +600,6 @@ interface MarkdownTreeNode {
 }
 
 const LINE_ENDING = /[ \t]*(?:\r\n|\r|\n)[ \t]*/;
-const PHRASING_BLOCK_TYPES = new Set(["paragraph", "heading", "tableCell"]);
-// Raw-text elements take everything up to their closing tag as text, and
-// rehype-raw leaves that state at the next element, so a <br> placed after an
-// unclosed `<textarea>` or `<script>` garbles or drops the rest of the block.
-const RAW_TEXT_OPEN_TAG = /^<(?:iframe|noembed|noframes|noscript|plaintext|script|style|textarea|title|xmp)(?=[\s/>]|$)/i;
-
-function opensRawTextElement(node: MarkdownTreeNode): boolean {
-  if (node.type === "html") return RAW_TEXT_OPEN_TAG.test(node.value ?? "");
-  return node.children?.some(opensRawTextElement) ?? false;
-}
 
 function lineBreakNode(): MarkdownTreeNode {
   return { type: "lineBreak", data: { hName: "br" } };
@@ -617,9 +607,6 @@ function lineBreakNode(): MarkdownTreeNode {
 
 function keepLineBreaks(parent: MarkdownTreeNode): void {
   if (!parent.children) return;
-  // Such a block keeps the default rendering: its paragraph newlines still
-  // show through the pre-wrap rule.
-  if (PHRASING_BLOCK_TYPES.has(parent.type) && opensRawTextElement(parent)) return;
   parent.children = parent.children.flatMap((node) => {
     if (node.type === "break") return [lineBreakNode()];
     if (node.type !== "text" || !node.value) {
@@ -651,6 +638,7 @@ export const markdownPreviewRemarkPlugins: ReactMarkdownOptions["remarkPlugins"]
 
 interface SanitizedNode {
   type?: string;
+  value?: unknown;
   properties?: Record<string, unknown>;
   children?: SanitizedNode[];
 }
@@ -691,6 +679,36 @@ function rehypeMatchClobberedIds(): (tree: unknown) => void {
 
 export const markdownRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
   rehypeRaw,
+  [rehypeSanitize, markdownSanitizeSchema],
+  rehypeMatchClobberedIds,
+  [rehypeKatex, { throwOnError: false, strict: false }],
+];
+
+/**
+ * A user's message is text they typed, so the HTML in it is shown, not parsed
+ * (#1406, #1407): `<TableOperator name="x" />` keeps its angle brackets and
+ * `${…}` inside it stays as written. remark-rehype already writes every mdast
+ * `html` node as a hast `raw` one; `rehype-raw` is what turns those into
+ * elements, so the user pipeline leaves it out and this plugin makes the source
+ * text, before sanitizing would drop an unhandled `raw` node.
+ */
+function rehypeRawHtmlAsText() {
+  return (tree: SanitizedNode): void => {
+    const visit = (node: SanitizedNode): void => {
+      if (!node.children) return;
+      node.children = node.children.flatMap((child) => child.type === "raw"
+        ? [{ type: "text", value: String(child.value ?? "") }]
+        : [child]);
+      for (const child of node.children) visit(child);
+    };
+    visit(tree);
+  };
+}
+
+// The user bubble's pipeline: `markdownRehypePlugins` without `rehype-raw`, so
+// the only raw HTML that renders in a chat is the assistant's and a file's.
+export const markdownUserRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
+  rehypeRawHtmlAsText,
   [rehypeSanitize, markdownSanitizeSchema],
   rehypeMatchClobberedIds,
   [rehypeKatex, { throwOnError: false, strict: false }],

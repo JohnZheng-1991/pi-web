@@ -401,19 +401,46 @@ test("leaves code and math line endings alone when keeping line breaks", () => {
   assert.match(emphasis, /<em>one<br\/>two<\/em>/);
 });
 
-test("keeps a block that opens a raw-text tag as it renders without line breaks", () => {
-  // A <br> after an unclosed <textarea> or <script> ends rehype-raw's raw-text
-  // state, which glued the lines together or dropped the rest of the block.
+test("shows the HTML a user typed instead of parsing it", () => {
+  // A user's message is text they typed (#1406, #1407): the tag stays on screen,
+  // including the `${…}` inside it, and no element comes of it.
+  const typed = '<TableOperator v-model="columns" :tableId="TABLE_ID_CONST.BUSINESS.${basic.businessModule.toUpperCase()}.Demo" :refresh="queryData" /> 咋更离谱呢';
+  const html = renderMarkdown(typed, { keepLineBreaks: true });
+
+  assert.match(html, /&lt;TableOperator v-model=&quot;columns&quot;/);
+  assert.match(html, /\$\{basic\.businessModule\.toUpperCase\(\)\}/);
+  assert.match(html, /咋更离谱呢/);
+  assert.doesNotMatch(html, /<tableoperator|<TableOperator/i);
+  // Markdown around it still works, links included.
+  assert.match(renderMarkdown("[docs](https://example.com/docs) and **bold**", { keepLineBreaks: true }), /<a [^>]*href="https:\/\/example\.com\/docs"[^>]*>docs<\/a> and <strong>bold<\/strong>/);
+});
+
+test("keeps the user's raw HTML as text across line breaks", () => {
+  // Every one of these opens a raw-text element, which rehype-raw's absence
+  // makes plain text: each line still ends in its own <br>.
   for (const markdown of [
     "Use a <textarea> here\nand a button\nplease",
     "Set <title>My\nPage</title> first\nthen deploy",
     "add <script>a()\nb()</script> to the page\nthen reload",
     "some *<style>x\ny</style>* then\nnext",
   ]) {
-    assert.equal(renderMarkdown(markdown, { keepLineBreaks: true }), renderMarkdown(markdown));
+    const html = renderMarkdown(markdown, { keepLineBreaks: true });
+    assert.doesNotMatch(html, /<(textarea|title|script|style)[\s>]/i, markdown);
+    assert.match(html, /<br\/>/, markdown);
   }
 
-  assert.match(renderMarkdown("normal <kbd>Ctrl</kbd>\nline two", { keepLineBreaks: true }), /<\/kbd><br\/>line two/);
+  assert.match(renderMarkdown("normal <kbd>Ctrl</kbd>\nline two", { keepLineBreaks: true }), /&lt;kbd&gt;Ctrl&lt;\/kbd&gt;<br\/>line two/);
   const list = renderMarkdown("- item <textarea>\n  more\n- two\n  lines", { keepLineBreaks: true });
   assert.match(list, /<li>two<br\/>lines<\/li>/);
+});
+
+test("assistant and file preview Markdown still render raw HTML (#1406)", () => {
+  // Only the user's bubble lost rehype-raw: the model's reply keeps it.
+  assert.match(renderMarkdown("normal <kbd>Ctrl</kbd>"), /normal <kbd>Ctrl<\/kbd>/);
+  assert.match(renderMarkdown("a <span>b</span>"), /<span>b<\/span>/);
+  const preview = renderToStaticMarkup(React.createElement(ReactMarkdown, {
+    remarkPlugins: markdownPreviewRemarkPlugins,
+    rehypePlugins: markdownPreviewRehypePlugins,
+  }, "<kbd>Ctrl</kbd>"));
+  assert.match(preview, /<kbd>Ctrl<\/kbd>/);
 });

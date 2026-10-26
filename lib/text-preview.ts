@@ -14,6 +14,18 @@ function utf8SequenceLength(byte: number): number {
   return 1;
 }
 
+/** NUL is not valid text content; a short prefix avoids treating ZIP and similar files as text. */
+export function isBinaryPreview(filePath: string): boolean {
+  const fd = fs.openSync(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(8000);
+    const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytesRead).includes(0);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 export function readTextPreviewChunk(
   filePath: string,
   fileSize: number,

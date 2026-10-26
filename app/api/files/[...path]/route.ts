@@ -31,7 +31,7 @@ import {
 import { parseFormDataWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { filePathFromApiSegments, samePath } from "@/lib/paths";
 import { hasParentDirectorySegment } from "@/lib/path-security";
-import { readTextPreviewChunk } from "@/lib/text-preview";
+import { isBinaryPreview, readTextPreviewChunk } from "@/lib/text-preview";
 
 const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
@@ -553,7 +553,7 @@ export async function GET(
         // The watch's `change` events carry the same pair (lib/file-version.ts).
         mtime: stat.mtime.toISOString(),
         language: getLanguage(filePath),
-        mime: imageMime || audioMime || videoMime || documentMime || "text/plain",
+        mime: imageMime || audioMime || videoMime || documentMime || (isBinaryPreview(filePath) ? "application/octet-stream" : "text/plain"),
         previewKind: documentPreviewKind(filePath),
       });
     }

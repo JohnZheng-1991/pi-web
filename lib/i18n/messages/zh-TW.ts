@@ -599,6 +599,7 @@ export const zhTWLocale: LocalePlugin = {
     "chat.followUpHint": "在 Agent 完成後排入此訊息",
     "chat.inputHistory": "輸入紀錄",
     "chat.modelError": "模型錯誤",
+    "chat.directoryError": "工作目錄錯誤",
     "chat.modelScopeWarning": "模型範圍警告",
     "chat.modelScopeWarnings": "模型範圍警告",
     "chat.send": "傳送",

@@ -7,6 +7,8 @@ import { ImagePreview } from "./ImagePreview";
 import { ThinkingIcon } from "./ThinkingIcon";
 import { copyText } from "@/lib/clipboard";
 import { useI18n } from "@/hooks/useI18n";
+import { formatUpdatedTime } from "@/lib/i18n/format";
+import type { Locale } from "@/lib/i18n/types";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { getAssistantErrorMessage, getThinkingPreview, hasAssistantAnswer, isAssistantTruncated, isEmptyThinkingBlock, splitThinkingPieces } from "@/lib/message-display";
@@ -248,17 +250,18 @@ export function getModelDisplayName(
     ?? `${provider}/${responseModel}`;
 }
 
-function formatTime(ts?: number): string | null {
+// The reader's own regional format (#1372): without a locale the runtime picks
+// one, and a 24-hour profile got AM/PM times.
+function formatTime(ts: number | undefined, locale: Locale): string | null {
   if (!ts) return null;
   const d = new Date(ts);
   const now = new Date();
   const isToday = d.getFullYear() === now.getFullYear() &&
     d.getMonth() === now.getMonth() &&
     d.getDate() === now.getDate();
-  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (isToday) return time;
-  const date = d.toLocaleDateString([], { month: "short", day: "numeric", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
-  return `${date} ${time}`;
+  if (isToday) return formatUpdatedTime(ts, locale) || null;
+  const date = d.toLocaleDateString(locale, { month: "short", day: "numeric", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
+  return `${date} ${d.toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" })}`;
 }
 
 export function replaceUserMessageText(message: UserMessage, text: string): UserMessage {
@@ -354,7 +357,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   onCancelEdit?: () => void;
   isEditing?: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -385,7 +388,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
     ? commandText.slice(commandSeparator + 1)
     : "";
 
-  const time = formatTime(message.timestamp);
+  const time = formatTime(message.timestamp, locale);
   const canFork = !!entryId && !!onFork;
   const copyTarget = commandText ?? content;
   const editTarget = commandText ? replaceUserMessageText(message, commandText) : message;
@@ -395,6 +398,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
       {imageBlocks.map((img, i) => {
         // lib/types.ts ImageContent uses {source:{type,data,media_type,url}}
         // pi-ai on-disk format uses flat {data, mimeType} — handle both
+        // SAFETY: older session records may have the flat form instead of ImageContent.
         const flat = img as unknown as { data?: string; mimeType?: string };
         const src = img.source
           ? img.source.type === "base64"
@@ -696,8 +700,8 @@ function AssistantMessageView({
   isCompacting?: boolean;
   compactError?: string | null;
 }) {
-  const { t } = useI18n();
-  const time = showTimestamp ? formatTime(message.timestamp) : null;
+  const { t, locale } = useI18n();
+  const time = showTimestamp ? formatTime(message.timestamp, locale) : null;
   const blockItems = useMemo(() => (message.content ?? [])
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming })), [message.content, isStreaming]);
@@ -1815,11 +1819,11 @@ function PairedResult({ text, isEmpty, isError }: {
 }
 
 function CompactionMessageView({ message }: { message: CustomMessage }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   // Collapsed by default, as in pi's TUI: a summary can run to pages.
   const [expanded, setExpanded] = useState(false);
   const summary = getMessageText(message.content);
-  const time = formatTime(message.timestamp);
+  const time = formatTime(message.timestamp, locale);
   const tokensBefore = (message.details as { tokensBefore?: unknown } | undefined)?.tokensBefore;
   // pi's showCacheMissNotices (#1265): what the compaction billed, in its card.
   const costNotice = getTranscriptNotices(message).find((notice) => notice.kind === "summary_cost" && notice.source === "compaction");
@@ -1948,7 +1952,7 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
 }
 
 function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string, page?: number) => void }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   // Expanded by default: pi's TUI always draws a displayed custom message in full.
   const [contentExpanded, setContentExpanded] = useState(true);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
@@ -1958,7 +1962,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   const hasDetails = message.details !== undefined;
   const detailsText = hasDetails ? safeJson(message.details) : "";
   const title = formatCustomType(message.customType);
-  const time = formatTime(message.timestamp);
+  const time = formatTime(message.timestamp, locale);
 
   const copyContent = () => {
     copyText(text || detailsText).then(() => {
@@ -2132,6 +2136,7 @@ function getMessageImages(content: CustomMessage["content"] | UserMessage["conte
 }
 
 function imageSource(img: ImageContent): string {
+  // SAFETY: older session records may have the flat form instead of ImageContent.
   const flat = img as unknown as { data?: string; mimeType?: string };
   if (img.source) {
     return img.source.type === "base64"
