@@ -4,6 +4,11 @@ import React, { memo, useRef, useState, useCallback, useEffect, useLayoutEffect,
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { SkillsResponse } from "@/lib/api-types";
 import type { TextContent, UserMessage } from "@/lib/types";
+import type { AgentMessage } from "@/lib/types";
+import {
+  loadFollowUpSuggestionSettings, saveFollowUpSuggestionSettings,
+  type FollowUpSuggestionSettings,
+} from "@/lib/follow-up-suggestion-settings";
 import {
   clearDraft,
   getDraft,
@@ -27,6 +32,11 @@ import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
 import { DismissButton } from "./DismissButton";
+import { FavoriteModelsRow } from "./FavoriteModelsRow";
+import {
+  MAX_FAVORITE_MODELS, addFavoriteModel, getFavoriteModels,
+  removeFavoriteModel, setFavoriteModels, type FavoriteModel,
+} from "@/lib/favorite-models";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useEnterSendMode } from "@/hooks/useEnterSendMode";
 import { useI18n } from "@/hooks/useI18n";
@@ -53,6 +63,9 @@ interface Props {
   isStreaming: boolean;
   /** Text-only composer without the session controls or outer spacing. */
   compact?: boolean;
+  suggestionMessages?: AgentMessage[];
+  suggestionThinkingLevels?: Record<string, string[]>;
+  suggestionThinkingLevelMaps?: Record<string, Record<string, string | null>>;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
@@ -60,7 +73,8 @@ interface Props {
   modelError?: string | null;
   /** Diagnostics from resolving `enabledModels`, e.g. a pattern that matched nothing. */
   modelScopeWarnings?: string[];
-  onModelChange?: (provider: string, modelId: string) => void;
+  /** May be async: a saved pair applies its level only once the model switch landed. */
+  onModelChange?: (provider: string, modelId: string) => void | Promise<void>;
   modelSwitching?: boolean;
   /** The model new sessions start with, starred in the model selector. */
   defaultModel?: { provider: string; modelId: string } | null;
@@ -676,6 +690,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   cwd,
   onAttachFiles,
   compact = false,
+  suggestionMessages,
+  suggestionThinkingLevels = {},
+  suggestionThinkingLevelMaps = {},
 }: Props, ref) {
   const { t } = useI18n();
   const { fontSize } = useChatAppearance();
@@ -685,11 +702,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
+  const [favoriteModels, setFavoriteModelsState] = useState<FavoriteModel[]>(() => getFavoriteModels());
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
+  const [suggestionSettings, setSuggestionSettings] = useState<FollowUpSuggestionSettings>(loadFollowUpSuggestionSettings);
+  const [suggestionMenuOpen, setSuggestionMenuOpen] = useState(false);
+  const [suggestionThinkingOpen, setSuggestionThinkingOpen] = useState(false);
+  const [suggestionLanguageOpen, setSuggestionLanguageOpen] = useState(false);
+  const [suggestion, setSuggestion] = useState("");
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
   ));
   const trimmedValue = value.trimStart();
+  const updateSuggestionSettings = useCallback((patch: Partial<FollowUpSuggestionSettings>) => {
+    setSuggestionSettings((current) => {
+      const next = { ...current, ...patch };
+      saveFollowUpSuggestionSettings(next);
+      return next;
+    });
+  }, []);
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
   const bashExcluded = bashMode && trimmedValue.startsWith("!!");
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
@@ -719,6 +749,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const controlsMenuRef = useRef<HTMLDivElement>(null);
+  const suggestionMenuRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -737,6 +768,49 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const pendingImageCountRef = useRef(0);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
+  const suggestionKey = `${draftKey ?? ""}:${suggestionMessages?.length ?? 0}:${suggestionSettings.model?.provider ?? model?.provider ?? ""}:${suggestionSettings.model?.modelId ?? model?.modelId ?? ""}:${suggestionSettings.thinkingLevel}:${suggestionSettings.language}`;
+  const activeSuggestionKeyRef = useRef("");
+  useEffect(() => { activeSuggestionKeyRef.current = suggestionKey; }, [suggestionKey]);
+  const selectedSuggestionModel = suggestionSettings.model ?? model;
+  const selectedSuggestionKey = selectedSuggestionModel ? `${selectedSuggestionModel.provider}:${selectedSuggestionModel.modelId}` : "";
+  const suggestionAvailableLevels = suggestionThinkingLevels[selectedSuggestionKey] ?? null;
+  const suggestionLevelMap = suggestionThinkingLevelMaps[selectedSuggestionKey] ?? null;
+  const suggestionLevelLabel = (level: string) => suggestionLevelMap?.[level] ?? level;
+
+  useEffect(() => {
+    if (compact || !suggestionSettings.enabled || !model || !suggestionMessages?.length || value || isStreaming) {
+      setSuggestion("");
+      return;
+    }
+    const lastMessage = suggestionMessages[suggestionMessages.length - 1];
+    if (lastMessage?.role !== "assistant" || !lastMessage.content.some((block) => block.type === "text" && block.text.trim())) {
+      setSuggestion("");
+      return;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch("/api/follow-up-suggestion", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: suggestionSettings.model?.provider ?? model.provider,
+            modelId: suggestionSettings.model?.modelId ?? model.modelId,
+            messages: suggestionMessages,
+            thinkingLevel: suggestionSettings.thinkingLevel,
+            language: suggestionSettings.language,
+          }),
+          signal: controller.signal,
+        });
+        if (!response.ok) return;
+        const result = await response.json() as { suggestion?: string };
+        if (result.suggestion && !valueRef.current && activeSuggestionKeyRef.current === suggestionKey) setSuggestion(result.suggestion);
+      } catch {
+        // Suggestions are optional; a failed or cancelled request never interrupts chat.
+      }
+    }, 400);
+    return () => { clearTimeout(timer); controller.abort(); };
+  }, [compact, isStreaming, model, suggestionKey, suggestionMessages, suggestionSettings, value]);
 
   useImperativeHandle(ref, () => ({
     insertIfEmpty(text: string) {
@@ -972,6 +1046,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
   const clearInput = useCallback(() => {
+    setSuggestion("");
     valueRef.current = "";
     setValue("");
     setAtQuery(null);
@@ -995,6 +1070,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
     if (previousDraftKey === draftKey) return;
+    setSuggestion("");
 
     if (previousDraftKey) {
       setDraft(previousDraftKey, {
@@ -1498,6 +1574,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
 
+      if (e.key === "Tab" && suggestion && !value && !isComposing && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+        e.preventDefault();
+        valueRef.current = suggestion;
+        setValue(suggestion);
+        setSuggestion("");
+        requestAnimationFrame(() => {
+          const textarea = textareaRef.current;
+          if (!textarea) return;
+          textarea.focus();
+          textarea.setSelectionRange(suggestion.length, suggestion.length);
+        });
+        return;
+      }
+
+      if (e.key === "Escape" && suggestion && !isComposing && !isStreaming) {
+        setSuggestion("");
+        return;
+      }
+
       if (e.key === "ArrowUp" && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
         e.preventDefault();
         setSlashMenuOpen(false);
@@ -1523,7 +1618,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, enterSendMode, isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
+    [isMobile, enterSendMode, isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, suggestion]
   );
 
   const handleInput = useCallback(() => {
@@ -1677,6 +1772,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     ? `${compactResult.reason && compactResult.reason !== "manual" ? `${compactResult.reason[0].toUpperCase()}${compactResult.reason.slice(1)} ` : t("chat.compacted")} ${formatTokenCount(compactResult.tokensBefore)} -> ${formatTokenCount(compactResult.estimatedTokensAfter)} tokens (${t("chat.tokensSaved", { saved: formatTokenCount(compactSavedTokens) })})`
     : null;
   const resolvedThinkingLevel = thinkingLevel && thinkingLevel !== "auto" ? thinkingLevel : null;
+
+  const handleAddFavorite = useCallback((entry: FavoriteModel) => {
+    const next = addFavoriteModel(favoriteModels, entry);
+    setFavoriteModelsState(next);
+    setFavoriteModels(next);
+  }, [favoriteModels]);
+  const handleRemoveFavorite = useCallback((key: string) => {
+    const next = removeFavoriteModel(favoriteModels, key);
+    setFavoriteModelsState(next);
+    setFavoriteModels(next);
+  }, [favoriteModels]);
+  const handleApplyFavorite = useCallback(async (provider: string, modelId: string, level: FavoriteModel["thinkingLevel"]) => {
+    // The level follows the switch, so a model without the level cannot clamp it on the way.
+    await onModelChange?.(provider, modelId);
+    if (level) onThinkingLevelChange?.(level);
+  }, [onModelChange, onThinkingLevelChange]);
   const thinkingDisplayLabel = (() => {
     const lvl = resolvedThinkingLevel ?? "auto";
     if (lvl === "auto" || !thinkingLevelMap) return lvl;
@@ -1696,6 +1807,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       }
       if (controlsMenuRef.current && !controlsMenuRef.current.contains(e.target as Node)) {
         setControlsMenuOpen(false);
+      }
+      if (suggestionMenuRef.current && !suggestionMenuRef.current.contains(e.target as Node)) {
+        setSuggestionMenuOpen(false);
       }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
@@ -2276,12 +2390,25 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
             } as React.CSSProperties}
           >
+          <div style={{ position: "relative", flex: stackedComposer ? "none" : 1, minWidth: 0, alignSelf: "stretch" }}>
+            {suggestion && !value && (
+              <div aria-hidden="true" style={{
+                position: "absolute", inset: 0, display: "flex", alignItems: "center",
+                overflow: "hidden", whiteSpace: "nowrap", pointerEvents: "none",
+                color: "var(--text-dim)", fontSize: "var(--chat-content-font-size, 14px)",
+                lineHeight: 1.6, fontFamily: "inherit", minHeight: compact ? 96 : 24,
+              }}>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{suggestion}</span>
+                <kbd style={{ marginLeft: 10, flexShrink: 0, padding: "0 5px", border: "1px solid var(--border)", borderRadius: 4, fontSize: 11, fontFamily: "inherit" }}>Tab</kbd>
+              </div>
+            )}
           <textarea
             ref={textareaRef}
             className="chat-input-textarea"
             aria-label={compact ? t("chat.quoteQuestion") : undefined}
             value={value}
             onChange={(e) => {
+              setSuggestion("");
               valueRef.current = e.target.value;
               setValue(e.target.value);
               setHistoryMenuOpen(false);
@@ -2327,6 +2454,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               overflow: "auto",
             }}
           />
+          </div>
 
           {isStreaming ? (
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
@@ -2418,6 +2546,22 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           <div className="text-xs px-2 py-1" style={{ color: bashExcluded ? "var(--text-muted)" : "var(--accent)", marginTop: 4 }}>
              {t("chat.shell")} · {bashExcluded ? t("chat.outputLocal") : t("chat.outputModel")}
           </div>
+        )}
+
+        {/* Saved model + reasoning pairs, one click each */}
+        {!compact && (
+          <FavoriteModelsRow
+            entries={favoriteModels}
+            current={model ?? null}
+            currentThinkingLevel={resolvedThinkingLevel}
+            thinkingLevelMap={thinkingLevelMap}
+            options={modelOptions}
+            onApply={onModelChange && onThinkingLevelChange && !modelSwitching ? handleApplyFavorite : undefined}
+            onAdd={onModelChange ? handleAddFavorite : undefined}
+            onRemove={handleRemoveFavorite}
+            canAdd={favoriteModels.length < MAX_FAVORITE_MODELS}
+            disabled={isStreaming}
+          />
         )}
 
         {/* Bottom bar: left | center (context) | right */}
@@ -2551,6 +2695,40 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 backdropFilter: "blur(10px)",
               } : null),
             }}>
+            <div ref={suggestionMenuRef} style={{ position: "relative" }}>
+              <button type="button" title={t("chat.suggestionTitle")} aria-label={t("chat.suggestionTitle")} aria-expanded={suggestionMenuOpen}
+                onClick={() => setSuggestionMenuOpen((open) => !open)}
+                style={{ width: 32, height: 32, padding: 0, border: "none", borderRadius: 9, background: suggestionMenuOpen ? "var(--bg-hover)" : "none", color: suggestionSettings.enabled ? "var(--text-muted)" : "var(--text-dim)", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M9 18h6M10 22h4M8.4 14.5A6 6 0 1 1 15.6 14.5C14.7 15.2 14 16 14 17h-4c0-1-.7-1.8-1.6-2.5Z" />
+                </svg>
+              </button>
+              {suggestionMenuOpen && <div style={{ position: "absolute", bottom: "calc(100% + 6px)", right: 0, zIndex: 100, width: "min(360px, calc(100vw - 32px))", padding: 14, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 10, boxShadow: "0 -4px 16px rgba(0,0,0,0.12)", display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{t("chat.suggestionTitle")}</div>
+                <label style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+                  {t("chat.suggestionEnabled")}
+                  <input type="checkbox" checked={suggestionSettings.enabled} onChange={(event) => updateSuggestionSettings({ enabled: event.target.checked })} style={{ width: 36, height: 20, accentColor: "var(--accent)" }} />
+                </label>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, fontSize: 13 }}>
+                  <span style={{ width: 64 }}>{t("chat.suggestionModel")}</span>
+                  <ModelSelector options={modelOptions} value={suggestionSettings.model} onChange={(provider, modelId) => updateSuggestionSettings({ model: { provider, modelId } })} onClear={() => updateSuggestionSettings({ model: null })} emptyLabel={t("chat.suggestionCurrentModel")} ariaLabel={t("chat.suggestionModel")} variant="field" placement="up" />
+                </div>
+                <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 12, fontSize: 13 }}>
+                  <span style={{ width: 64 }}>{t("chat.suggestionThinking")}</span>
+                  <button type="button" aria-label={t("chat.suggestionThinking")} onClick={() => { setSuggestionThinkingOpen((open) => !open); setSuggestionLanguageOpen(false); }} style={{ flex: 1, display: "flex", justifyContent: "space-between", padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer" }}>{suggestionLevelLabel(suggestionSettings.thinkingLevel)}<span>⌄</span></button>
+                  {suggestionThinkingOpen && <div style={{ position: "absolute", bottom: "calc(100% + 6px)", left: 76, right: 0, zIndex: 510, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                    {THINKING_LEVELS.filter((level) => level === "auto" || !suggestionAvailableLevels || suggestionAvailableLevels.includes(level)).map((level) => <SelectorRow key={level} active={suggestionSettings.thinkingLevel === level} onSelect={() => { updateSuggestionSettings({ thinkingLevel: level }); setSuggestionThinkingOpen(false); }}><span style={{ fontSize: 12 }}>{suggestionLevelLabel(level)}</span></SelectorRow>)}
+                  </div>}
+                </div>
+                <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 12, fontSize: 13 }}>
+                  <span style={{ width: 64 }}>{t("common.language")}</span>
+                  <button type="button" aria-label={t("common.language")} onClick={() => { setSuggestionLanguageOpen((open) => !open); setSuggestionThinkingOpen(false); }} style={{ flex: 1, display: "flex", justifyContent: "space-between", padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 7, background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer" }}>{t(`chat.suggestionLanguage.${suggestionSettings.language}`)}<span>⌄</span></button>
+                  {suggestionLanguageOpen && <div style={{ position: "absolute", bottom: "calc(100% + 6px)", left: 76, right: 0, zIndex: 510, background: "var(--bg)", border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden" }}>
+                    {(["auto", "en", "zh-CN", "zh-TW"] as const).map((language) => <SelectorRow key={language} active={suggestionSettings.language === language} onSelect={() => { updateSuggestionSettings({ language }); setSuggestionLanguageOpen(false); }}><span style={{ fontSize: 12 }}>{t(`chat.suggestionLanguage.${language}`)}</span></SelectorRow>)}
+                  </div>}
+                </div>
+              </div>}
+            </div>
             {onThinkingLevelChange && (
               <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
                 <button

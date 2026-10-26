@@ -159,3 +159,15 @@ test("opening a PDF without a page fragment clears a previous jump", () => {
   assert.equal(next.page, undefined);
   assert.equal(next.viewerRevision, 1);
 });
+
+test("bumping a file's revision re-reads it and leaves other tabs alone", async () => {
+  const { bumpFileTabRevisions } = await import("./file-tab-state.ts");
+  const tabs = [
+    { id: "a", label: "a.ts", filePath: "/repo/a.ts", viewerRevision: 2 },
+    { id: "b", label: "b.ts", filePath: "/repo/b.ts" },
+  ];
+  const next = bumpFileTabRevisions(tabs, "/repo/a.ts");
+  assert.equal(next[0].viewerRevision, 3);
+  assert.equal(next[1], tabs[1]);
+  assert.equal(tabs[0].viewerRevision, 2);
+});

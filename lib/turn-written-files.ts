@@ -13,6 +13,11 @@ import type { SplitDiffFile } from "./patch";
 export interface WrittenFile {
   /** Resolved absolute path of a file this turn wrote. */
   filePath: string;
+  /** Calls that touched this path; used to wait for the turn's final snapshot. */
+  toolCallIds: string[];
+  /** The turn's net change, filled in from its file snapshots (absent for older turns). */
+  additions?: number;
+  deletions?: number;
 }
 
 function isFileWritingToolName(toolName: string): boolean {
@@ -88,15 +93,15 @@ function readApplyPatchPaths(input: Record<string, unknown> | undefined, result:
  * touched, so it is not a source here; the tool call is the record of what
  * happened.
  *
- * Paths are resolved against `cwd`, deduped, and kept in first-seen order.
+ * Paths are resolved against `cwd` and deduped in first-seen order. Their net
+ * line counts come from the turn's file snapshots, not summed intermediate patches.
  */
 export function extractTurnWrittenFiles(
   content: AssistantContentBlock[],
   toolResults: Map<string, ToolResultMessage> | undefined,
   cwd?: string,
 ): WrittenFile[] {
-  const seen = new Set<string>();
-  const writtenFiles: WrittenFile[] = [];
+  const byPath = new Map<string, WrittenFile>();
 
   for (const block of content) {
     if (block.type !== "toolCall") continue;
@@ -105,10 +110,8 @@ export function extractTurnWrittenFiles(
     const result = toolResults?.get(block.toolCallId);
     if (!result || result.isError) continue;
 
-    const rawPaths = isApplyPatchToolName(block.toolName)
-      ? readApplyPatchPaths(block.input, result)
-      : [readToolPath(block.input)];
-
+    const isApplyPatch = isApplyPatchToolName(block.toolName);
+    const rawPaths = isApplyPatch ? readApplyPatchPaths(block.input, result) : [readToolPath(block.input)];
     for (const rawPath of rawPaths) {
       if (!rawPath) continue;
 
@@ -117,11 +120,11 @@ export function extractTurnWrittenFiles(
       const filePath = resolveLocalFilePath(rawPath, cwd);
       if (!filePath) continue;
 
-      if (seen.has(filePath)) continue;
-      seen.add(filePath);
-      writtenFiles.push({ filePath });
+      const existing = byPath.get(filePath);
+      if (existing) existing.toolCallIds.push(block.toolCallId);
+      else byPath.set(filePath, { filePath, toolCallIds: [block.toolCallId] });
     }
   }
 
-  return writtenFiles;
+  return [...byPath.values()];
 }

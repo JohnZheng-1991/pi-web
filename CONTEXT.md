@@ -15,3 +15,11 @@ _Avoid_: Host environment, inherited environment
 **Built-in Project Shell**:
 A shell entry point owned and operated by Pi Web for commands associated with a project.
 _Avoid_: Extension shell, arbitrary child process
+
+**Agent Patch**:
+The diff one tool call recorded in its own result, describing only the lines that call changed.
+_Avoid_: Tool diff, result diff, change set
+
+**Working Tree Diff**:
+A file's difference from HEAD in its repository, covering every uncommitted change whatever wrote it, the user included.
+_Avoid_: File diff, the file's changes

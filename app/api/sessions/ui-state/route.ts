@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
+import { clearSessionSnapshots } from "@/lib/file-snapshots";
+import { clearTurnBaselines } from "@/lib/turn-baseline";
 import {
   readSessionUiState,
   SessionUiStateLockedError,
@@ -58,6 +60,14 @@ export async function POST(req: Request) {
   const { request } = parsed;
   try {
     const state = await updateSessionUiState(request);
+    // Archiving hides a session for good: the copies of the files it wrote are
+    // the bulk of what it leaves on disk, and nothing shows them once it is
+    // archived, so they go. Undo is no longer offered for it (`lib/file-snapshots.ts`).
+    // shortcut: only the archived ids' own snapshots, a subagent session's are kept.
+    if (request.action === "set" && "archived" in request && request.archived) {
+      clearSessionSnapshots(request.ids);
+      clearTurnBaselines(request.ids);
+    }
     // A name with no room left was not stored (nothing was written): say so,
     // rather than answer with a state that quietly lacks it.
     if (request.action === "rename-project" && request.name !== null && storedProjectName(state, request.projectKey) !== request.name) {

@@ -97,11 +97,16 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
     ["Ctrl+Enter mode: Enter completes an exact slash command instead of sending it", {}, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "slash"],
     ["Ctrl+Enter mode: Ctrl+Enter sends an exact slash command", { ctrlKey: true }, { enterSendMode: "ctrlEnter", isStreaming: false, slashMenuOpen: true, slashQuery: "copy", value: "/copy", displayedSlashCommands: [{ name: "copy", source: "builtin" }] }, "send"],
     ["mobile ignores Ctrl+Enter mode for plain Enter", {}, { enterSendMode: "ctrlEnter", isMobile: true }, "native"],
+    ["Tab accepts an empty-composer suggestion", { key: "Tab", nativeEvent: { keyCode: 9 } }, { isStreaming: false, suggestion: "Run the tests", valueRef: {} }, "prevented"],
+    ["Tab preserves a draft", { key: "Tab", nativeEvent: { keyCode: 9 } }, { isStreaming: false, suggestion: "Run the tests", value: "draft" }, "native"],
+    ["IME keeps Tab", { key: "Tab", nativeEvent: { isComposing: true, keyCode: 229 } }, { isStreaming: false, suggestion: "Run the tests" }, "native"],
+    ["history completion keeps Tab priority", { key: "Tab", nativeEvent: { keyCode: 9 } }, { suggestion: "Run the tests", historyMenuOpen: true }, "history"],
+    ["slash completion keeps Tab priority", { key: "Tab", nativeEvent: { keyCode: 9 } }, { suggestion: "Run the tests", slashMenuOpen: true, slashQuery: "help" }, "slash"],
+    ["file completion keeps Tab priority", { key: "Tab", nativeEvent: { keyCode: 9 } }, { suggestion: "Run the tests", atMenuOpen: true, atQuery: {} }, "file"],
   ];
   for (const [name, keys, state, expected] of cases) {
     let action = "native";
-    const handler = script.runInNewContext({
-      Date: { now: () => 1000 },
+    const context = { Date: { now: () => 1000 },
       COMPOSITION_END_ENTER_GRACE_MS: 100,
       isMobile: false, isStreaming: true, enterSendMode: "enter",
       isComposingRef: { current: false }, lastCompositionEndAtRef: { current: 0 },
@@ -114,15 +119,19 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
       submitsSlashCommandOnEnter, value: "", setSlashMenuOpen() {},
       applyAtCompletion() { action = "file"; },
       applyHistoryInput() { action = "history"; },
+      suggestion: "", value: "", valueRef: { current: "" }, setValue() {}, setSuggestion() {}, textareaRef: { current: null },
+      requestAnimationFrame() {},
       ...state,
-    });
+    };
+    const handler = script.runInNewContext(context);
     handler({
-      key: "Enter", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
+      key: state.key ?? "Enter", shiftKey: false, altKey: false, ctrlKey: false, metaKey: false,
       nativeEvent: { isComposing: false, keyCode: 13 },
-      preventDefault() { action = "prevented"; },
+      preventDefault() { if (action === "native") action = "prevented"; },
       ...keys,
     });
     assert.equal(action, expected, name);
+    if (name === "Tab accepts an empty-composer suggestion") assert.equal(context.valueRef.current, "Run the tests");
   }
 });
 
@@ -1029,4 +1038,36 @@ test("selector rows keep the default star and the floating save button in one gu
   const active = row({ active: true });
   assert.match(active, /aria-selected="true"/);
   assert.doesNotMatch(active, /border-left/);
+});
+
+test("the quick-pick row saves the current model and reasoning level, at most five", () => {
+  const render = (props) => renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      null,
+      React.createElement(ChatInput, {
+        onSend() {}, onAbort() {}, isStreaming: false,
+        modelList: [
+          { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic" },
+          { id: "gpt-5.5", name: "GPT-5.5", provider: "openai" },
+        ],
+        model: { provider: "anthropic", modelId: "claude-sonnet-4-6" },
+        thinkingLevel: "high",
+        onModelChange() {},
+        onThinkingLevelChange() {},
+        ...props,
+      }),
+    ),
+  );
+
+  const row = (html) => html.slice(html.indexOf('class="chat-favorite-models"'), html.indexOf('class="chat-input-controls"'));
+  const html = render({});
+  // The live model and level are what the "+" button saves; the row starts empty.
+  assert.equal((row(html).match(/<button\b/g) ?? []).length, 1);
+  assert.match(row(html), /aria-label="Save the current model and reasoning level"/);
+
+  // Without a reasoning handler the row has nothing it may switch, so it stays away.
+  assert.doesNotMatch(render({ onThinkingLevelChange: undefined }), /chat-favorite-models/);
+  // A compact composer (a Settings field) never gets it.
+  assert.doesNotMatch(render({ compact: true }), /chat-favorite-models/);
 });

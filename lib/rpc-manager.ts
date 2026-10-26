@@ -17,6 +17,8 @@ import {
   preferUserBashExtension,
 } from "./project-command-env";
 import { cacheSessionPath, catalogFirstMessage, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
+import { captureBefore, commitWriteSnapshot, snapshotTargetPaths } from "./file-snapshots";
+import { captureTurnBaseline, recordTurnBaseline } from "./turn-baseline";
 import { computeLiveSessionTotalActiveMs } from "./session-timing";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
 import { notifySessionComplete } from "./web-push";
@@ -307,6 +309,18 @@ export class AgentSessionWrapper {
   // next stream miss that same event.
   private listeners = new Set<EventListener>();
   private activeToolEvents = new Map<string, AgentEvent>();
+  /**
+   * The file text each running write tool found before it ran, keyed by
+   * `toolCallId:path`, so its end can record a snapshot of what it changed.
+   */
+  private snapshotBefores = new Map<string, string | null | undefined>();
+  /**
+   * The run's own turn, keyed by its user message's entry; null while idle.
+   * Read from the transcript when the run starts, once that entry is stored.
+   */
+  private turnKey: { sessionId: string; turnId: string } | null = null;
+  /** A subagent's ancestor turn: it shares the working tree, so its writes are in that turn's diff. */
+  private adoptedTurn: { sessionId: string; turnId: string } | null = null;
   private pendingUiResponses = new Map<string, PendingUiResponse>();
   private pendingUiRequests = new Map<string, AgentEvent>();
   private activeCustomUis = new Map<string, ActiveCustomUi>();
@@ -360,6 +374,57 @@ export class AgentSessionWrapper {
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.mcpHost = options.mcpHost;
     this.chatOnlyExtensionModel = options.chatOnlyExtensionModel;
+  }
+
+  /**
+   * The turn as the chat keys it: `sessionId` whose card lists the writes (a
+   * subagent's parent) and `turnId`, its user message's entry. Undefined while idle.
+   */
+  attachParentTurn(): { sessionId: string; turnId: string } | void {
+    return this.adoptedTurn ?? this.turnKey ?? undefined;
+  }
+
+  /**
+   * Called by a subagent's wrapper. It writes in the same working tree, so its
+   * files are already in the parent turn's baseline diff; this only says which
+   * turn that is.
+   */
+  adoptParentTurn(parentTurn: { sessionId: string; turnId: string }): void {
+    this.adoptedTurn = parentTurn;
+  }
+
+  /**
+   * The run's turn starts at its user message: the chat groups a turn from
+   * there, so `sessionId#turnId` names the same turn on both sides.
+   *
+   * Called on the user message's `message_start`: the SDK stores an entry just
+   * before emitting its event, so the run's entry is readable here and nowhere
+   * earlier. The tree is then read (not awaited, since the run must not wait on
+   * git), which is the turn's baseline. A subagent keeps its ancestor's turn
+   * instead: it shares the working tree, so its writes are already in that diff.
+   *
+   * shortcut: the read races the run, and wins in practice — the run cannot write
+   * before its first model response, which outlasts a tree read (tens of ms here,
+   * ~130 ms in this repo). Await it in the prompt path if a huge checkout ever
+   * loses a file from its turn.
+   */
+  private noteRunTurn(): void {
+    if (this.turnKey || this.adoptedTurn) return;
+    const entries = this.inner.sessionManager.getEntries() as unknown as SessionEntry[];
+    for (let index = entries.length - 1; index >= 0; index--) {
+      const entry = entries[index];
+      if (entry.type !== "message") continue;
+      if ((entry as { message?: { role?: unknown } }).message?.role !== "user") continue;
+      this.turnKey = { sessionId: this.sessionId, turnId: entry.id };
+      // A git read, so not awaited: a tool call cannot start before this event's
+      // handler returns, so the tree is still the one the run began with.
+      void captureTurnBaseline(this.cwd).then((baseline) => {
+        if (baseline) recordTurnBaseline(this.sessionId, entry.id, baseline);
+      }).catch((error: unknown) => {
+        console.warn("[pi-web] could not record the turn's baseline:", error instanceof Error ? error.message : error);
+      });
+      return;
+    }
   }
 
   get sessionId(): string {
@@ -438,17 +503,26 @@ export class AgentSessionWrapper {
       if (event.type === "agent_start") {
         this.agentRunNeedsCompletion = true;
         this.lastRunAborted = false;
+        // A new run, a new turn; the entry is read at its user message.
+        this.turnKey = null;
       }
       if (event.type === "agent_settled") this.lastRunAborted = event.aborted === true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
         // Every tool call of the run has finished; nothing is left to replay.
         this.activeToolEvents.clear();
+        // Nothing will pair these any more: a call interrupted before its end
+        // leaves its captured text behind (a Stop between start and end).
+        this.snapshotBefores.clear();
       }
+      // The baseline is taken when the run's user message appears, before any
+      // tool of the run can write (see noteRunTurn).
+      if (event.type === "message_start" && (event as { message?: { role?: unknown } }).message?.role === "user") this.noteRunTurn();
       // A name from setSessionName(), an extension's included: a title generated
       // in the background lands after the run's agent_end, a command's with no
       // run at all, and the sidebar would keep the old one (#1237).
       if (event.type === "session_info_changed") invalidateSessionListCache();
+      this.trackWriteSnapshot(event);
       this.trackActiveToolEvent(event);
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
       this.emit(event.type === "message_end" ? this.withTranscriptNotices(event) : event);
@@ -499,6 +573,43 @@ export class AgentSessionWrapper {
       const nestedPrefix = `${toolCallId}/`;
       for (const id of this.activeToolEvents.keys()) {
         if (id.startsWith(nestedPrefix)) this.activeToolEvents.delete(id);
+      }
+    }
+  }
+
+  /**
+   * Keep a copy of each file a write tool is about to change, so a turn can be
+   * undone. Read at the tool's start: at the end the tool has already written.
+   * A failed call keeps nothing.
+   */
+  private trackWriteSnapshot(event: AgentEvent): void {
+    const toolCallId = event.toolCallId;
+    if (isNestedToolExecutionEvent(event)) return;
+    if (event.type === "tool_execution_start") {
+      const toolName = (event as { toolName?: unknown }).toolName;
+      if (typeof toolName !== "string") return;
+      if (typeof toolCallId !== "string") return;
+      const paths = snapshotTargetPaths(toolName, event.args ?? (event as { input?: unknown }).input, this.cwd);
+      for (const path of paths) {
+        try {
+          this.snapshotBefores.set(`${toolCallId}:${path}`, captureBefore(path));
+        } catch {
+          this.snapshotBefores.set(`${toolCallId}:${path}`, undefined);
+        }
+      }
+      return;
+    }
+    if (event.type !== "tool_execution_end") return;
+    const prefix = `${toolCallId}:`;
+    for (const [key, before] of this.snapshotBefores) {
+      if (!key.startsWith(prefix)) continue;
+      this.snapshotBefores.delete(key);
+      if (event.isError) continue;
+      const path = key.slice(prefix.length);
+      try {
+        commitWriteSnapshot(this.sessionId, path, before);
+      } catch (error) {
+        console.warn("[pi-web] could not keep a file snapshot:", error instanceof Error ? error.message : error);
       }
     }
   }
@@ -2150,6 +2261,7 @@ const SUBAGENT_CONTROLLER = createSubagentController({
     registerRpcWrapper(wrapper);
     return wrapper;
   },
+
   reopenSession: async (sessionId, sessionFile) =>
     (await startRpcSession(sessionId, sessionFile, undefined)).session,
   resolveSessionPath,

@@ -197,6 +197,29 @@ export function diffGapLabel(count: number, t: (key: string, params?: Translatio
   return count === 1 ? t("diff.unchangedLine") : t("diff.unchangedLines", { count });
 }
 
+/** How many lines a patch added and removed. */
+export interface PatchLineCount {
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * The added and removed line count of a parsed patch, across all its files.
+ * Context lines and gaps count as neither; a null patch counts nothing.
+ */
+export function countPatchLines(files: SplitDiffFile[] | null): PatchLineCount {
+  let additions = 0;
+  let deletions = 0;
+  for (const file of files ?? []) {
+    for (const row of file.rows) {
+      if (row.type !== "line") continue;
+      if (row.left.type === "removed") deletions++;
+      if (row.right.type === "added") additions++;
+    }
+  }
+  return { additions, deletions };
+}
+
 function cleanPatchPath(path: string): string {
   return path.split("\t")[0].trim();
 }

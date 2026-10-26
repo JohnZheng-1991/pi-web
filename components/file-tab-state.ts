@@ -30,9 +30,20 @@ export function switchFileWorkspace(
   return { tabs: parked.tabs, activeTabId: parked.activeTabId, open: parked.open };
 }
 
+/**
+ * Gives the tabs showing `filePath` a new viewer generation, so the file is
+ * read from disk again: its text changed under the viewer (an undone write).
+ */
+export function bumpFileTabRevisions(tabs: Tab[], filePath: string): Tab[] {
+  return tabs.map((tab) => tab.filePath === filePath
+    ? { ...tab, viewerRevision: (tab.viewerRevision ?? 0) + 1 }
+    : tab);
+}
+
 interface OpenFileTabInput {
   fileName: string;
   filePath: string;
+  diffUrl?: string;
   modeHint?: "diff";
   page?: number;
   sourceSessionId?: string | null;
@@ -47,6 +58,7 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
       label: input.fileName,
       filePath: input.filePath,
       sourceSessionId: input.sourceSessionId,
+      diffUrl: input.diffUrl,
       initialDisplayMode: input.modeHint,
       page: input.page,
       viewerState: input.modeHint ? {
@@ -64,7 +76,9 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
   );
   const sourceUnchanged = !sourceChanged;
   const pageChanged = existing.page !== input.page;
-  if (sourceUnchanged && !input.modeHint && !pageChanged) return tabs;
+  // Another turn, or a file opened without one: the diff shown must change too.
+  const diffChanged = existing.diffUrl !== input.diffUrl;
+  if (sourceUnchanged && !input.modeHint && !pageChanged && !diffChanged) return tabs;
 
   return tabs.map((tab) => {
     if (tab.id !== input.tabId) return tab;
@@ -76,6 +90,10 @@ export function openFileTab(tabs: Tab[], input: OpenFileTabInput): Tab[] {
     }
     if (pageChanged) {
       next.page = input.page;
+      bumpRevision = true;
+    }
+    if (diffChanged) {
+      next.diffUrl = input.diffUrl;
       bumpRevision = true;
     }
     if (input.modeHint) {

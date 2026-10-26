@@ -111,10 +111,18 @@ test("the line-number gutter is pinned only in views of at most SOURCE_HIGHLIGHT
   const { outputText: diffOutput } = ts.transpileModule(`return ${diffView.getText(file)}`, { compilerOptions: { jsx: ts.JsxEmit.React, target: ts.ScriptTarget.ES2022 } });
   const diffNumberStyle = (rowCount) => {
     const added = Array.from({ length: rowCount }, (_, index) => ({ type: "added", text: "line", oldLineNo: null, newLineNo: index + 1 }));
-    const DiffView = new Function("React", "useI18n", "diffLines", "SOURCE_HIGHLIGHT_MAX_LINES", "FILE_CODE_STYLE", "FILE_LINE_NUMBER_STYLE", "FILE_PINNED_LINE_NUMBER_STYLE", diffOutput)(
-      React, () => ({ t: (key) => key }), () => added, maxRows, codeStyle, gutterStyle, pinnedStyle,
+    // The diff now keeps a selection and a measured position: hooks and the
+    // document are what it needs beyond the row data this test supplies.
+    // Called as a plain function, so the hooks it calls are stubbed: only the
+    // row markup before them matters here.
+    const hooks = [() => [], () => [null, () => {}], () => {}];
+    const DiffView = new Function("React", "useRef", "useState", "useEffect", "useI18n", "diffLines", "getSelectedDiffLineRange", "SOURCE_HIGHLIGHT_MAX_LINES", "FILE_CODE_STYLE", "FILE_LINE_NUMBER_STYLE", "FILE_PINNED_LINE_NUMBER_STYLE", diffOutput)(
+      React, ...hooks, () => ({ t: (key) => key }), () => added, () => null, maxRows, codeStyle, gutterStyle, pinnedStyle,
     );
-    return DiffView({ patch: "" }).props.children[0].props.children[0].props.children[0].props.style;
+    // children[0] is the segment list (an array, since a second child — the
+    // comment button, absent here — joins it); then the segment, its rows and
+    // the row's number cell.
+    return DiffView({ patch: "" }).props.children[0][0].props.children[0].props.children[0].props.style;
   };
 
   // The pinned gutter is the same column, pinned to the left edge of the

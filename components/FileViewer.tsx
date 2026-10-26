@@ -8,6 +8,7 @@ import { vs } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/cjs/styles/prism";
 import ReactMarkdown from "react-markdown";
 import { useTheme } from "@/hooks/useTheme";
+import { clampSnippet } from "@/lib/line-comments";
 import { usePrismLanguages } from "@/hooks/usePrismLanguages";
 import {
   DOCX_PREVIEW_MAX_BYTES,
@@ -47,7 +48,11 @@ interface Props {
   onMentionLines?: (relativePath: string, startLine: number, endLine: number) => void;
   /** Insert this file's relative path into the chat input (@ mention). */
   onAtMention?: (relativePath: string, isDir: boolean) => void;
+  /** A right-click on a selection: comment on those lines, quoting `snippet`. */
+  onCommentLines?: (comment: { relativePath: string; startLine: number; endLine: number; snippet: string; point: { x: number; y: number } }) => void;
   gitRefreshKey?: number;
+  /** A chat turn's own patch for this file (`/api/sessions/<id>/turn-diff`); replaces the working tree diff. */
+  diffUrl?: string;
   initialDisplayMode?: DisplayMode;
   /** PDF page to open on first render (`#page=N` from a markdown link). */
   initialPage?: number;
@@ -301,9 +306,67 @@ function diffLines(patch: string): Array<DiffLine | DiffGap> {
   return files.flatMap(unifiedDiffLines);
 }
 
-function DiffView({ patch }: { patch: string }) {
+/** A diff selection, ready to become a comment on the new file. */
+interface DiffSelection {
+  startLine: number;
+  endLine: number;
+  snippet: string;
+  point: { x: number; y: number };
+}
+
+/**
+ * The lines a diff selection covers, by the new file's numbering. Removed rows
+ * have no line in the new file, so a selection made only of them has nothing to
+ * comment on and is reported as none.
+ */
+function getSelectedDiffLineRange(root: HTMLElement, selection: Selection | null): Omit<DiffSelection, "point"> | null {
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
+  const range = selection.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null;
+
+  let startLine: number | null = null;
+  let endLine: number | null = null;
+  for (const row of root.querySelectorAll<HTMLElement>(".file-diff-line[data-new-line]")) {
+    if (!range.intersectsNode(row)) continue;
+    const lineNumber = Number(row.dataset.newLine);
+    if (!Number.isInteger(lineNumber)) continue;
+    if (startLine === null) startLine = lineNumber;
+    endLine = lineNumber;
+  }
+  if (startLine === null || endLine === null) return null;
+  return { startLine, endLine, snippet: clampSnippet(selection.toString()) };
+}
+
+function DiffView({ patch, onCommentLines }: {
+  patch: string;
+  /** Given means a selection in the diff offers to comment on those lines. */
+  onCommentLines?: (selection: DiffSelection) => void;
+}) {
   const { t } = useI18n();
   const diff = diffLines(patch);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [pending, setPending] = useState<DiffSelection | null>(null);
+
+  // Measured after the browser has finished the selection, which is why this
+  // listens for mouseup/keyup rather than for `selectionchange`.
+  useEffect(() => {
+    if (!onCommentLines) return;
+    const measure = (event: globalThis.MouseEvent) => {
+      const root = rootRef.current;
+      const selected = root ? getSelectedDiffLineRange(root, window.getSelection()) : null;
+      setPending(selected ? { ...selected, point: { x: event.clientX, y: event.clientY } } : null);
+    };
+    const clearIfCollapsed = () => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed) setPending(null);
+    };
+    document.addEventListener("mouseup", measure);
+    document.addEventListener("keyup", clearIfCollapsed);
+    return () => {
+      document.removeEventListener("mouseup", measure);
+      document.removeEventListener("keyup", clearIfCollapsed);
+    };
+  }, [onCommentLines]);
 
   const isChange = (l: DiffLine | DiffGap) => l.type === "added" || l.type === "removed";
   const hasChanges = diff.some(isChange);
@@ -357,7 +420,9 @@ function DiffView({ patch }: { patch: string }) {
   return (
     <div
       className="file-diff-view"
+      ref={rootRef}
       style={{
+        position: "relative",
         width: "max-content",
         minWidth: "100%",
         ...FILE_CODE_STYLE,
@@ -398,6 +463,7 @@ function DiffView({ patch }: { patch: string }) {
             <div
               key={li}
               className="file-diff-line"
+              data-new-line={line.type === "removed" ? undefined : line.newLineNo ?? undefined}
               style={{
                 display: "flex",
                 minWidth: "100%",
@@ -442,6 +508,36 @@ function DiffView({ patch }: { patch: string }) {
         });
         return <div key={si}>{lines}</div>;
       })}
+
+      {/* Floating, so the selection stays visible behind it: the button is a
+          separate click and the range is already measured. */}
+      {pending && onCommentLines && (
+        <button
+          type="button"
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={() => {
+            onCommentLines(pending);
+            setPending(null);
+            window.getSelection()?.removeAllRanges();
+          }}
+          style={{
+            position: "fixed",
+            top: Math.min(pending.point.y + 8, Math.max(8, window.innerHeight - 48)),
+            left: Math.max(8, Math.min(pending.point.x, window.innerWidth - 180)),
+            zIndex: 200,
+            padding: "4px 10px",
+            border: "1px solid var(--accent)",
+            borderRadius: 6,
+            background: "var(--bg-panel)",
+            color: "var(--text)",
+            boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          {t("files.commentSelection", { count: pending.endLine - pending.startLine + 1 })}
+        </button>
+      )}
     </div>
   );
 }
@@ -1138,7 +1234,9 @@ export function FileViewer({
   onOpenFile,
   onMentionLines,
   onAtMention,
+  onCommentLines,
   gitRefreshKey,
+  diffUrl,
   initialDisplayMode,
   initialState,
   initialPage,
@@ -1170,7 +1268,9 @@ export function FileViewer({
       onOpenFile={onOpenFile}
       onMentionLines={onMentionLines}
       onAtMention={onAtMention}
+      onCommentLines={onCommentLines}
       gitRefreshKey={gitRefreshKey}
+      diffUrl={diffUrl}
       initialDisplayMode={initialDisplayMode}
       initialState={initialState}
       onStateChange={onStateChange}
@@ -1186,7 +1286,9 @@ function TextFileViewer({
   onOpenFile,
   onMentionLines,
   onAtMention,
+  onCommentLines,
   gitRefreshKey,
+  diffUrl,
   initialDisplayMode,
   initialState,
   onStateChange,
@@ -1216,6 +1318,9 @@ function TextFileViewer({
   const gitDiffRequestRef = useRef(0);
   const contentRef = useRef<HTMLDivElement | null>(null);
   const autoDiffAppliedRef = useRef(false);
+  // Neither a restored state nor a mode hint: this tab may pick its own first mode.
+  const defaultModeEligible = initialState === undefined && initialDisplayMode === undefined;
+  const defaultDiffEligibleRef = useRef(defaultModeEligible);
   const defaultPreviewEligibleRef = useRef(
     initialState === undefined && initialDisplayMode === undefined,
   );
@@ -1236,6 +1341,7 @@ function TextFileViewer({
   const updateDisplayMode = useCallback((nextDisplayMode: DisplayMode) => {
     viewerStateRef.current.displayMode = nextDisplayMode;
     setDisplayMode(nextDisplayMode);
+    defaultDiffEligibleRef.current = false;
   }, []);
 
   const toggleWrapLines = useCallback(() => {
@@ -1257,6 +1363,7 @@ function TextFileViewer({
     viewerStateRef.current = nextState;
     scrollRestorePendingRef.current = true;
     autoDiffAppliedRef.current = false;
+    defaultDiffEligibleRef.current = defaultModeEligible;
     setDisplayMode(requestedInitialDisplayMode);
     setWrapLines(initialWrapLines);
 
@@ -1270,6 +1377,7 @@ function TextFileViewer({
     initialWrapLines,
     initialScrollTop,
     initialScrollLeft,
+    defaultModeEligible,
   ]);
 
   const fetchContent = useCallback((filePath: string, offset = 0) => {
@@ -1296,31 +1404,79 @@ function TextFileViewer({
       });
   }, [sourceSessionId]);
 
-  const fetchGitDiff = useCallback(async (targetPath: string) => {
+  // Three callers want the same file's diff when one opens (the path effect, the
+  // watcher's connect, `gitRefreshKey`), and each `git diff` costs ~300-500 ms.
+  // So a result is kept per path, and a second call while one is in flight joins
+  // it instead of starting another. A file the watcher reports as changed, and
+  // `gitRefreshKey`, drop the entry: a commit changes the diff without touching
+  // the file's size or mtime.
+  const gitDiffCacheRef = useRef(new Map<string, { result: GitFileDiffResponse | null; at: number; promise?: Promise<GitFileDiffResponse | null> }>());
+
+  const loadGitDiff = useCallback(async (targetPath: string): Promise<GitFileDiffResponse | null> => {
+    // A turn's diff replaces the working tree's for that tab: one request,
+    // the same patch the chat's counts come from.
+    if (diffUrl) {
+      try {
+        const response = await fetch(diffUrl);
+        const next = await response.json() as GitFileDiffResponse & { error?: string };
+        return response.ok && next.supported && typeof next.patch === "string" ? next : null;
+      } catch {
+        return null;
+      }
+    }
+    if (!cwd) return null;
+    const cache = gitDiffCacheRef.current;
+    const cached = cache.get(targetPath);
+    if (cached?.promise) return cached.promise;
+    if (cached) return cached.result;
+
+    const promise = (async () => {
+      try {
+        const params = new URLSearchParams({ cwd, path: targetPath });
+        const response = await fetch(`/api/git/diff?${params.toString()}`);
+        const next = await response.json() as GitFileDiffResponse & { error?: string };
+        return response.ok && next.supported && typeof next.patch === "string" ? next : null;
+      } catch {
+        return null;
+      }
+    })();
+    cache.set(targetPath, { result: null, at: 0, promise });
+    const result = await promise;
+    // The entry may have been dropped while this ran (`gitRefreshKey`, a change).
+    if (cache.get(targetPath)?.promise === promise) cache.set(targetPath, { result, at: Date.now() });
+    return result;
+  }, [cwd, diffUrl]);
+
+  const fetchGitDiff = useCallback(async (targetPath: string, options: { refresh?: boolean } = {}) => {
+    // Opening one file fires three refreshes at once; within a second they are
+    // the same question asked again, and each answer costs a `git diff`.
+    const kept = gitDiffCacheRef.current.get(targetPath);
+    // An in-flight entry is never dropped: the refresh is already being answered.
+    if (options.refresh && kept && !kept.promise && Date.now() - kept.at > 1000) gitDiffCacheRef.current.delete(targetPath);
+    if (options.refresh && !kept) gitDiffCacheRef.current.delete(targetPath);
     const requestId = ++gitDiffRequestRef.current;
     setGitDiffLoading(true);
-    if (!cwd) {
+    if (!cwd && !diffUrl) {
       setGitDiff(null);
       setGitDiffLoading(false);
       setGitDiffResolved(true);
       return;
     }
 
-    try {
-      const params = new URLSearchParams({ cwd, path: targetPath });
-      const response = await fetch(`/api/git/diff?${params.toString()}`);
-      const next = await response.json() as GitFileDiffResponse & { error?: string };
-      if (requestId !== gitDiffRequestRef.current) return;
-      setGitDiff(response.ok && next.supported && typeof next.patch === "string" ? next : null);
-    } catch {
-      if (requestId === gitDiffRequestRef.current) setGitDiff(null);
-    } finally {
-      if (requestId === gitDiffRequestRef.current) {
-        setGitDiffLoading(false);
-        setGitDiffResolved(true);
-      }
+    // A kept diff paints at once; the refresh that follows replaces it when it
+    // lands, so re-opening a file is immediate rather than another git wait.
+    const keptResult = gitDiffCacheRef.current.get(targetPath)?.result;
+    if (keptResult) {
+      setGitDiff(keptResult);
+      setGitDiffResolved(true);
     }
-  }, [cwd]);
+    const next = await loadGitDiff(targetPath);
+    if (requestId === gitDiffRequestRef.current) {
+      setGitDiff(next);
+      setGitDiffLoading(false);
+      setGitDiffResolved(true);
+    }
+  }, [cwd, diffUrl, loadGitDiff]);
 
   // Reset and load the file itself when its identity changes. Live watching is
   // managed separately so pausing it never clears the displayed content.
@@ -1356,7 +1512,7 @@ function TextFileViewer({
     let active = true;
     const synchronize = () => {
       void fetchContent(filePath);
-      void fetchGitDiff(filePath);
+      void fetchGitDiff(filePath, { refresh: true });
     };
 
     const es = new EventSource(getFileApiUrl(filePath, "watch", sourceSessionId));
@@ -1378,7 +1534,7 @@ function TextFileViewer({
         .then((meta: { size?: number; mtime?: string }) => {
           if (!active) return;
           if (fileVersionChanged(shownVersionRef.current, fileVersion(meta))) synchronize();
-          else void fetchGitDiff(filePath);
+          else void fetchGitDiff(filePath, { refresh: true });
         })
         .catch(() => {
           if (active) synchronize();
@@ -1401,19 +1557,30 @@ function TextFileViewer({
   }, [filePath, fetchContent, fetchGitDiff, sourceSessionId, watchEnabled]);
 
   useEffect(() => {
-    void fetchGitDiff(filePath);
+    void fetchGitDiff(filePath, { refresh: true });
   }, [fetchGitDiff, filePath, gitRefreshKey]);
 
   const isDelimitedTable = isDelimitedTablePath(filePath);
+  const hasGitDiff = gitDiff?.supported === true && typeof gitDiff.patch === "string";
+  const isDeletedDiff = hasGitDiff && gitDiff.status === "deleted";
 
   useEffect(() => {
+    // A changed file opens on its diff; Source is one click away. `hasGitDiff`
+    // is what enables the Diff button, so a file with no changes keeps Source.
+    if (defaultDiffEligibleRef.current && hasGitDiff) {
+      updateDisplayMode("diff");
+      return;
+    }
     // HTML gets the same rendered-first treatment as markdown: a generated page
     // is usually more useful viewed than read as source. Both have a preview
     // mode already; the source tab stays one click away. A restored choice or
     // explicit mode hint always wins over this default. A CSV/TSV file opens
-    // as its table, even while only its first chunk is loaded.
+    // as its table, even while only its first chunk is loaded. The git answer
+    // comes first: a changed file is a diff before it is a preview.
     if (
       defaultPreviewEligibleRef.current
+      && gitDiffResolved
+      && !hasGitDiff
       && data
       && (
         isDelimitedTable
@@ -1424,7 +1591,7 @@ function TextFileViewer({
       defaultPreviewEligibleRef.current = false;
       updateDisplayMode("preview");
     }
-  }, [data, isDelimitedTable, updateDisplayMode]);
+  }, [data, gitDiffResolved, hasGitDiff, isDelimitedTable, updateDisplayMode]);
 
   // Large HTML: the source view loads 256 KB chunks, but a half document cannot
   // render, so the preview fetches the whole file once. A new `data` (watch
@@ -1450,9 +1617,6 @@ function TextFileViewer({
       });
     return () => controller.abort();
   }, [needsHtmlFull, data, filePath, sourceSessionId]);
-
-  const hasGitDiff = gitDiff?.supported === true && typeof gitDiff.patch === "string";
-  const isDeletedDiff = hasGitDiff && gitDiff.status === "deleted";
 
   useEffect(() => {
     if (gitDiffResolved && !hasGitDiff && displayMode === "diff") updateDisplayMode("source");
@@ -1593,6 +1757,38 @@ function TextFileViewer({
       lineRange.endLine,
     );
   }, [cwd, filePath, onMentionLines]);
+
+  useEffect(() => {
+    if (!onCommentLines || displayMode !== "source") return;
+
+    const handleContextMenu = (event: PointerEvent) => {
+      const root = contentRef.current;
+      const selection = window.getSelection();
+      if (!root) return;
+      // Only a selection inside the source lines gets the menu: elsewhere the
+      // browser's own (copy, inspect) is what the user meant.
+      const lineRange = getSelectedSourceLineRange(root, selection);
+      if (!lineRange) return;
+      event.preventDefault();
+      onCommentLines({
+        relativePath: getRelativeFilePath(filePath, cwd),
+        startLine: lineRange.startLine,
+        endLine: lineRange.endLine,
+        // The quoted source is read now: the selection is gone by the time the
+        // comment is submitted.
+        snippet: clampSnippet(selection?.toString() ?? ""),
+        point: { x: event.clientX, y: event.clientY },
+      });
+    };
+
+    // On the viewer's scrolling box rather than on `window`: a right-click
+    // outside it (the toolbar, a tab) keeps the browser's menu.
+    const scrollBox = contentRef.current;
+    scrollBox?.addEventListener("contextmenu", handleContextMenu);
+    return () => scrollBox?.removeEventListener("contextmenu", handleContextMenu);
+    // `data` too: on the first render the scrolling box is not mounted yet, so
+    // an effect that only watched the mode would attach to nothing.
+  }, [displayMode, filePath, cwd, onCommentLines, data]);
 
   useEffect(() => {
     if (!onMentionLines || displayMode !== "source") return;
@@ -1825,7 +2021,13 @@ function TextFileViewer({
         style={{ flex: 1, overflow: "auto", background: "var(--bg)", paddingBottom: showLoadMore ? 48 : undefined }}
       >
         {effectiveDisplayMode === "diff" && hasGitDiff ? (
-          <DiffView patch={gitDiff.patch!} />
+          <DiffView
+            patch={gitDiff.patch!}
+            onCommentLines={onCommentLines ? (selection) => onCommentLines({
+              relativePath: getRelativeFilePath(filePath, cwd),
+              ...selection,
+            }) : undefined}
+          />
         ) : isHtml && effectiveDisplayMode === "preview" && data?.truncated && !htmlFull?.text ? (
           <div style={{ padding: 24, color: "var(--text-dim)", fontSize: 12 }}>
             {htmlFull?.error ?? t("i18n.loading")}

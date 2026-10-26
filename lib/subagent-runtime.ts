@@ -58,6 +58,10 @@ interface HostSession {
    * wrapper's `send()`; false when Stop or `signal` ended the wait and the run must not start.
    */
   prepareMcpForRun?(signal: AbortSignal): Promise<boolean>;
+  /** The turn this session is in right now, as its chat keys it; null while idle. */
+  attachParentTurn?(): { sessionId: string; turnId: string } | void;
+  /** File this run's writes under the parent's current turn. */
+  adoptParentTurn?(parentTurn: { sessionId: string; turnId: string }): void;
 }
 
 export interface SubagentRuntimeDependencies {
@@ -530,6 +534,10 @@ export function createSubagentController(
         chatOnly,
         ...(mcp?.mcpHost ? { mcpHost: mcp.mcpHost } : {}),
       });
+      // This run's writes belong to the turn that launched it: the parent's chat
+      // then lists them beside its own, with the parent turn's own net counts.
+      const parentTurn = parent.attachParentTurn?.();
+      if (parentTurn) childSession?.adoptParentTurn?.(parentTurn);
 
       const initialRun: SubagentRunInfo = {
         sessionId: inner.sessionId,
@@ -727,6 +735,9 @@ export function createSubagentController(
     if (!wrapper?.isAlive()) wrapper = await dependencies.reopenSession(request.sessionId, sessionPath);
     if (!wrapper.isAlive()) throw new Error("Subagent session is no longer available");
     if (wrapper.isRunning()) throw new Error("Subagent is already running");
+    // As in `start()`: this run's writes join the parent's current turn.
+    const parentTurn = parent.attachParentTurn?.();
+    if (parentTurn) wrapper.adoptParentTurn?.(parentTurn);
     // The run prompts the SDK session directly, past the wrapper's `send()`, so refuse here as
     // `send()` does: an isolated child's worktree is removed when its run ends, and a run in the
     // missing folder would only let the model's tools fail (and `write` recreate it outside git).

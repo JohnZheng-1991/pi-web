@@ -26,6 +26,7 @@
 *.pem
 /.agents/
 /skills-lock.json
+/.codebase-memory/
 
 # debug
 npm-debug.log*

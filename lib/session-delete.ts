@@ -27,6 +27,8 @@ import {
 } from "./session-reader";
 import { sessionPathKey } from "./session-path";
 import { forgetSessionUiState } from "./session-ui-state";
+import { clearSessionSnapshots } from "./file-snapshots";
+import { clearTurnBaselines } from "./turn-baseline";
 import { readSubagentRun, SUBAGENT_META_TYPE } from "./subagents";
 import type { SessionEntry } from "./types";
 
@@ -237,6 +239,13 @@ export async function deleteSessions(
     }
     invalidateSessionPathCache(deletedId);
     invalidateSessionManagerCache(deletedPath);
+  }
+  // The copies of the files they wrote are the bulk of what a session leaves behind.
+  try {
+    clearSessionSnapshots(deletedSessionIds);
+    clearTurnBaselines(deletedSessionIds);
+  } catch (error) {
+    console.warn(`[pi-web] could not clear the file snapshots of deleted sessions: ${error instanceof Error ? error.message : String(error)}`);
   }
   // Drop their pins and archive times; best effort, the files are already gone.
   try {

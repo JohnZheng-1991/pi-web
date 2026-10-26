@@ -53,13 +53,18 @@ export function getFinalAnswerViews(
   return views;
 }
 
-/** The list passed last time while the turn still wrote the same files, for the same reason. */
+/** The list passed last time while the turn still wrote the same files with the same counts, for the same reason. */
 export function keepWrittenFiles(views: FinalAnswerViews, next: WrittenFile[]): WrittenFile[] {
   const previous = views.writtenFiles;
   if (
     previous
     && previous.length === next.length
-    && previous.every((file, index) => file.filePath === next[index].filePath)
+    && previous.every((file, index) => (
+      file.filePath === next[index].filePath
+      && file.additions === next[index].additions
+      && file.deletions === next[index].deletions
+      && file.toolCallIds.join() === next[index].toolCallIds.join()
+    ))
   ) return previous;
   views.writtenFiles = next;
   return next;

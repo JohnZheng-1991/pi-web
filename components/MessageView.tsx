@@ -16,7 +16,8 @@ import { applyPatchPreviewToFiles, applyPatchResultHasFailures, extractApplyPatc
 import { isApplyPatchToolName, isEditToolName, isWriteToolName } from "@/lib/tool-names";
 import { isToolCallExpanded, setToolCallExpanded } from "@/lib/tool-call-expansion";
 import { isThinkingExpandedByDefault, THINKING_EXPANDED_EVENT } from "@/lib/thinking-expansion-preference";
-import { TurnWrittenFiles } from "./TurnWrittenFiles";
+import { TurnWrittenFiles, type UndoOutcome } from "./TurnWrittenFiles";
+import type { TurnDiffRef } from "@/lib/turn-diff";
 import type { WrittenFile } from "@/lib/turn-written-files";
 import { skillExpansionToCommand } from "@/lib/slash-display";
 import type { SubagentToolDetails } from "@/lib/subagent-extension";
@@ -217,6 +218,12 @@ interface Props {
   writtenFiles?: WrittenFile[];
   /** The whole turn's time, for a final answer with no process details to show it. */
   turnDurationMs?: number;
+  /** The turn these files belong to, so the card and the viewer show its net patch. */
+  turn?: TurnDiffRef;
+  /** Opens a written file in the diff view; absent when the caller has no diff pane. */
+  onOpenFileDiff?: (filePath: string, turn?: TurnDiffRef) => void;
+  /** Undoes one written file's write; absent when it cannot be undone here. */
+  onUndoFile?: (filePath: string) => Promise<UndoOutcome>;
   onCompact?: () => void;
   isCompacting?: boolean;
   compactError?: string | null;
@@ -287,12 +294,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlock, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, turnDurationMs, onCompact, isCompacting, compactError }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSubagent, entryId, searchBlock, onFork, forking, onEditContent, onCancelEdit, isEditing, showTimestamp, prevTimestamp, sessionId, writtenFiles, turn, turnDurationMs, onOpenFileDiff, onUndoFile, onCompact, isCompacting, compactError }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onEditContent={onEditContent} onCancelEdit={onCancelEdit} isEditing={isEditing} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlock={searchBlock} writtenFiles={writtenFiles} turnDurationMs={turnDurationMs} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSubagent={onOpenSubagent} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlock={searchBlock} writtenFiles={writtenFiles} turn={turn} turnDurationMs={turnDurationMs} onOpenFileDiff={onOpenFileDiff} onUndoFile={onUndoFile} onCompact={onCompact} isCompacting={isCompacting} compactError={compactError} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -326,7 +333,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.writtenFiles === next.writtenFiles
+    && prev.turn === next.turn
     && prev.turnDurationMs === next.turnDurationMs
+    && prev.onOpenFileDiff === next.onOpenFileDiff
+    && prev.onUndoFile === next.onUndoFile
     && prev.sessionId === next.sessionId
     && prev.onCompact === next.onCompact
     && prev.isCompacting === next.isCompacting
@@ -657,7 +667,10 @@ function AssistantMessageView({
   entryId,
   searchBlock,
   writtenFiles,
+  turn,
   turnDurationMs,
+  onOpenFileDiff,
+  onUndoFile,
   onCompact,
   isCompacting,
   compactError,
@@ -675,7 +688,10 @@ function AssistantMessageView({
   entryId?: string;
   searchBlock?: AssistantContentBlock;
   writtenFiles?: WrittenFile[];
+  turn?: TurnDiffRef;
   turnDurationMs?: number;
+  onOpenFileDiff?: (filePath: string, turn?: TurnDiffRef) => void;
+  onUndoFile?: (filePath: string) => Promise<UndoOutcome>;
   onCompact?: () => void;
   isCompacting?: boolean;
   compactError?: string | null;
@@ -937,7 +953,7 @@ function AssistantMessageView({
       )}
 
       {writtenFiles && writtenFiles.length > 0 && (
-        <TurnWrittenFiles files={writtenFiles} onOpenFile={onOpenFile} />
+        <TurnWrittenFiles files={writtenFiles} turn={turn} cwd={cwd} onOpenFileDiff={onOpenFileDiff} onUndoFile={onUndoFile} />
       )}
 
       <div style={{

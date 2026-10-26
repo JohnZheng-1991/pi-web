@@ -12,6 +12,8 @@ export interface Tab {
   kind?: "terminal" | "agent";
   closing?: boolean;
   sourceSessionId?: string | null;
+  /** A chat turn's own patch, shown instead of the working tree diff. */
+  diffUrl?: string;
   initialDisplayMode?: FileViewerDisplayMode;
   /** PDF page requested by the link that opened this tab (`#page=N`). */
   page?: number;

@@ -5,11 +5,12 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar, type SelectSessionOptions, type SessionSidebarControl } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
+import type { UndoOutcome } from "./TurnWrittenFiles";
 import { NewSessionContextBar, type NewSessionContextControl } from "./NewSessionContextBar";
 import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
-import { openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
+import { bumpFileTabRevisions, openFileTab, saveFileViewerState, saveParkedFileViewerState, switchFileWorkspace, type ParkedFileWorkspace } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
 import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
@@ -29,7 +30,10 @@ import { useAudio } from "@/hooks/useAudio";
 import { copyText } from "@/lib/clipboard";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { getFileName } from "@/lib/file-paths";
+import { getTurnDiffUrl, type TurnDiffRef } from "@/lib/turn-diff";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
+import { buildLineCommentsMessage } from "@/lib/line-comments";
+import { LineCommentBox, StagedCommentsBar, type StagedLineComment } from "./LineComments";
 import {
   claimExtensionAttentionNotification,
   shouldShowBrowserNotification,
@@ -628,6 +632,61 @@ export function AppShell() {
     if (isMobile) { setRightPanelOpen(false); setSidebarOpen(false); }
   }, [isMobile]);
 
+  // Commenting on a file selection: a right-click opens a box on those lines,
+  // and each comment is staged rather than written into the composer, so several
+  // can be collected and sent as one message (lib/line-comments.ts).
+  const [commentDraft, setCommentDraft] = useState<{
+    relativePath: string; startLine: number; endLine: number; snippet: string; top: number; left: number;
+  } | null>(null);
+  const [stagedComments, setStagedComments] = useState<StagedLineComment[]>([]);
+
+  const handleCommentLines = useCallback((selection: {
+    relativePath: string; startLine: number; endLine: number; snippet: string; point: { x: number; y: number };
+  }) => {
+    setCommentDraft({
+      relativePath: selection.relativePath,
+      startLine: selection.startLine,
+      endLine: selection.endLine,
+      snippet: selection.snippet,
+      top: selection.point.y + 8,
+      left: selection.point.x,
+    });
+  }, []);
+
+  const handleStageComment = useCallback((comment: string) => {
+    const draft = commentDraft;
+    if (!draft) return;
+    // Staged outside the draft's own setter: a state updater is re-run by React,
+    // and staging in there added every comment twice.
+    setStagedComments((previous) => [...previous, {
+      id: `${draft.relativePath}:${draft.startLine}-${draft.endLine}:${Date.now()}-${previous.length}`,
+      relativePath: draft.relativePath,
+      startLine: draft.startLine,
+      endLine: draft.endLine,
+      snippet: draft.snippet,
+      comment,
+    }]);
+    setCommentDraft(null);
+  }, [commentDraft]);
+
+  const handleRemoveStagedComment = useCallback((id: string) => {
+    setStagedComments((previous) => previous.filter((comment) => comment.id !== id));
+  }, []);
+
+  // One message from every staged comment: the composer is the only place the
+  // agent ever reads, so the list is drained only once the text is written.
+  const handleInsertStagedComments = useCallback(() => {
+    if (!chatInputRef.current || stagedComments.length === 0) return;
+    const message = buildLineCommentsMessage(stagedComments, {
+      intro: translate("comments.intro"),
+      commentLabel: translate("comments.commentLabel"),
+    });
+    chatInputRef.current.insertText(`${message}\n\n`);
+    chatInputRef.current.focus();
+    setStagedComments([]);
+    if (isMobile) setRightPanelOpen(false);
+  }, [stagedComments, isMobile, translate]);
+
   const initialSessionId = initialNavigation.sessionId;
   const initialLinkedSessionId = linkedSessionId(initialNavigation);
   const [activeCwd, setActiveCwd] = useState<string | null>(null);
@@ -1183,15 +1242,17 @@ export function AppShell() {
   const handleOpenFile = useCallback((
     filePath: string,
     fileName: string,
-    options?: { sourceSessionId?: string | null; modeHint?: "diff"; page?: number },
+    options?: { sourceSessionId?: string | null; modeHint?: "diff"; diffUrl?: string; page?: number },
   ) => {
     const sourceSessionId = options?.sourceSessionId;
     const modeHint = options?.modeHint;
+    const diffUrl = options?.diffUrl;
     const page = options?.page;
     const tabId = `file:${filePath}`;
     setFileTabs((prev) => openFileTab(prev, {
       fileName,
       filePath,
+      diffUrl,
       modeHint,
       page,
       sourceSessionId,
@@ -1206,6 +1267,53 @@ export function AppShell() {
   const handleOpenLinkedFile = useCallback((filePath: string, page?: number) => {
     handleOpenFile(filePath, getFileName(filePath), { sourceSessionId: selectedSession?.id ?? null, page });
   }, [handleOpenFile, selectedSession?.id]);
+
+  /** A turn's written file, opened on that turn's own diff (never the working tree's). */
+  const handleOpenLinkedFileDiff = useCallback((filePath: string, turn?: TurnDiffRef) => {
+    handleOpenFile(filePath, getFileName(filePath), {
+      sourceSessionId: selectedSession?.id ?? null,
+      modeHint: "diff",
+      diffUrl: turn ? getTurnDiffUrl(turn, filePath) : undefined,
+    });
+  }, [handleOpenFile, selectedSession?.id]);
+
+  // Undo goes through the server, which holds the copy of the file and refuses
+  // when it changed since. The tab showing that file then holds stale text.
+  const handleUndoWrittenFile = useCallback(async (filePath: string): Promise<UndoOutcome> => {
+    const sessionId = selectedSession?.id;
+    if (!sessionId) return { message: translate("chat.undoFailed", { reason: "no session" }), retryable: true };
+    let response: Response;
+    try {
+      response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/undo`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files: [filePath] }),
+      });
+    } catch (error) {
+      return { message: translate("chat.undoFailed", { reason: error instanceof Error ? error.message : String(error) }), retryable: true };
+    }
+    const data = await response.json().catch(() => null) as
+      | { results?: Array<{ ok?: boolean; reason?: string; deleted?: boolean }>; error?: string }
+      | null;
+    if (!response.ok) {
+      return { message: translate("chat.undoFailed", { reason: data?.error ?? response.statusText }), retryable: true };
+    }
+    const result = data?.results?.[0];
+    if (result?.ok) {
+      // The file on disk is not what the open tab shows any more.
+      if (result.deleted) {
+        setFileTabs((prev) => prev.filter((tab) => tab.filePath !== filePath));
+      } else {
+        // The viewer holds the text the write left; read the file again.
+        setFileTabs((prev) => bumpFileTabRevisions(prev, filePath));
+        setExplorerRefreshKey((key) => key + 1);
+      }
+      return { message: translate(result.deleted ? "chat.undoneDeleted" : "chat.undoneRestored") };
+    }
+    if (result?.reason === "no_snapshot") return { message: translate("chat.undoNoSnapshot") };
+    if (result?.reason === "conflict") return { message: translate("chat.undoConflict") };
+    return { message: translate("chat.undoRefused", { reason: result?.reason ?? response.statusText }), retryable: true };
+  }, [selectedSession?.id, translate]);
 
   const handleOpenTerminal = useCallback((cwd: string) => {
     const existing = terminalTabs.find((tab) => tab.cwd === cwd);
@@ -2595,6 +2703,8 @@ export function AppShell() {
               onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
+              onOpenFileDiff={handleOpenLinkedFileDiff}
+              onUndoFile={handleUndoWrittenFile}
               onFilesUploaded={handleExplorerRefresh}
               onOpenSubagent={handleOpenSubagentTab}
               onAskInNewChat={handleAskInNewChat}
@@ -2736,7 +2846,8 @@ export function AppShell() {
         </div>
 
         {/* Only the active viewer is mounted. Lightweight per-tab state is restored on activation. */}
-        <div style={{ flex: 1, minHeight: 0, overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
+        <div style={{ flex: 1, minHeight: 0, overflow: "hidden" }}>
           {activeFileTab?.filePath ? (
             <FileViewer
               key={`${fileWorkspaceGeneration}:${activeFileTab.id}:${activeFileTab.viewerRevision ?? 0}`}
@@ -2744,6 +2855,7 @@ export function AppShell() {
               cwd={activeCwd ?? undefined}
               sourceSessionId={activeFileTab.sourceSessionId}
               gitRefreshKey={explorerRefreshKey}
+              diffUrl={activeFileTab.diffUrl}
               initialDisplayMode={activeFileTab.initialDisplayMode}
               initialPage={activeFileTab.page}
               initialState={activeFileTab.viewerState}
@@ -2756,6 +2868,7 @@ export function AppShell() {
               )}
               onMentionLines={rightPanelOpen ? handleFileLineMention : undefined}
               onAtMention={handleAtMention}
+              onCommentLines={rightPanelOpen ? handleCommentLines : undefined}
               onOpenFile={(filePath, page) => handleOpenFile(
                 filePath,
                 getFileName(filePath),
@@ -2788,8 +2901,22 @@ export function AppShell() {
             />
           )}
         </div>
+        <StagedCommentsBar
+          comments={stagedComments}
+          onRemove={handleRemoveStagedComment}
+          onClear={() => setStagedComments([])}
+          onInsert={chatInputRef.current ? handleInsertStagedComments : undefined}
+        />
+        </div>
       </div>
     </div>
+    {commentDraft && (
+      <LineCommentBox
+        draft={commentDraft}
+        onStage={handleStageComment}
+        onCancel={() => setCommentDraft(null)}
+      />
+    )}
     {settingsSection && (
       <SettingsPanel
         cwd={projectTrustCwd}
