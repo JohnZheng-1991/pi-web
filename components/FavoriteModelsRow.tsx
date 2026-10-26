@@ -54,7 +54,8 @@ export function FavoriteModelsRow({
               onClick={() => option && onApply(entry.provider, entry.modelId, entry.thinkingLevel)}
               style={{ background: "none", border: "none", padding: 0, color: "inherit", font: "inherit", cursor: "inherit", overflow: "hidden", textOverflow: "ellipsis" }}
             >
-              {option?.name ?? entry.modelId}
+              {/* The chip is the only place the provider shows: the picker groups by it. */}
+              {`${entry.provider}/${option?.name ?? entry.modelId}`}
               <span style={{ color: "var(--text-dim)", marginLeft: 4 }}>{level}</span>
             </button>
             <button

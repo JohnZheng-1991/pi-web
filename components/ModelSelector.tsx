@@ -82,8 +82,10 @@ export function ModelSelector({
     else modelsByProvider.push({ provider: option.provider, options: [option] });
   }
 
+  // The trigger is the only place the provider is visible: the menu groups by
+  // provider instead, so its rows keep the bare name.
   const currentName = selectedLabel ?? (value
-    ? options.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
+    ? `${value.provider}/${options.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId}`
     : emptyLabel ?? (options.length > 0 ? "Select model" : "No models"));
 
   useEffect(() => {
